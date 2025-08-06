@@ -41,14 +41,25 @@ interface UserLimits {
   };
 }
 
+interface ServerInfo {
+  id: number;
+  nome: string;
+  limite_streamings: number;
+  streamings_ativas: number;
+  load_cpu: number;
+  tipo_servidor: string;
+}
+
 const DadosConexao: React.FC = () => {
   const { user, getToken } = useAuth();
   const [showFtpPassword, setShowFtpPassword] = useState(false);
   const [obsConfig, setObsConfig] = useState<OBSConfig | null>(null);
   const [obsStatus, setObsStatus] = useState<OBSStreamStatus | null>(null);
   const [userLimits, setUserLimits] = useState<UserLimits | null>(null);
+  const [serverInfo, setServerInfo] = useState<ServerInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [bitrateWarning, setBitrateWarning] = useState<string>('');
   
   const userLogin = user?.email?.split('@')[0] || `user_${user?.id || 'usuario'}`;
   
@@ -73,7 +84,20 @@ const DadosConexao: React.FC = () => {
         if (data.success) {
           setObsConfig(data.obs_config);
           setUserLimits(data.user_limits);
+          setServerInfo(data.server_info);
           setWarnings(data.warnings || []);
+          
+          // Verificar se bitrate está dentro do limite
+          if (data.user_limits?.bitrate) {
+            const maxBitrate = data.user_limits.bitrate.max;
+            const currentBitrate = data.obs_config?.max_bitrate || 0;
+            
+            if (currentBitrate > maxBitrate) {
+              setBitrateWarning(`Atenção: Bitrate configurado (${currentBitrate} kbps) excede o limite do seu plano (${maxBitrate} kbps). O sistema limitará automaticamente para ${maxBitrate} kbps.`);
+            } else {
+              setBitrateWarning('');
+            }
+          }
         }
       }
     } catch (error) {
@@ -187,6 +211,13 @@ const DadosConexao: React.FC = () => {
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6">
           <h3 className="text-yellow-900 font-medium mb-3">⚠️ Informações Importantes</h3>
           
+          {bitrateWarning && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md">
+              <h4 className="text-red-800 font-medium mb-2">🚫 Aviso de Bitrate</h4>
+              <p className="text-red-700 text-sm">{bitrateWarning}</p>
+            </div>
+          )}
+          
           {warnings.length > 0 && (
             <div className="mb-4">
               <h4 className="text-yellow-800 font-medium mb-2">Avisos:</h4>
@@ -203,6 +234,7 @@ const DadosConexao: React.FC = () => {
               <div className="bg-white p-3 rounded-md">
                 <h4 className="text-sm font-medium text-gray-700">Bitrate Máximo</h4>
                 <p className="text-lg font-bold text-gray-900">{userLimits.bitrate.max} kbps</p>
+                <p className="text-xs text-gray-500">Configurado: {obsConfig?.max_bitrate || 0} kbps</p>
               </div>
               <div className="bg-white p-3 rounded-md">
                 <h4 className="text-sm font-medium text-gray-700">Espectadores Máximo</h4>
@@ -221,6 +253,22 @@ const DadosConexao: React.FC = () => {
                     }`}
                     style={{ width: `${userLimits.storage.percentage}%` }}
                   ></div>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {serverInfo && (
+            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-md">
+              <h4 className="text-blue-800 font-medium mb-2">📊 Informações do Servidor</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-blue-700 text-sm">
+                <div>
+                  <p><strong>Servidor:</strong> {serverInfo.nome}</p>
+                  <p><strong>Tipo:</strong> {serverInfo.tipo_servidor}</p>
+                </div>
+                <div>
+                  <p><strong>Streamings Ativas:</strong> {serverInfo.streamings_ativas}/{serverInfo.limite_streamings}</p>
+                  <p><strong>Load CPU:</strong> {serverInfo.load_cpu}%</p>
                 </div>
               </div>
             </div>
@@ -414,9 +462,10 @@ const DadosConexao: React.FC = () => {
             <div className="text-green-800 text-sm space-y-1">
               <p>1. <strong>Servidor:</strong> Cole a URL RTMP no campo "Servidor"</p>
               <p>2. <strong>Chave:</strong> Cole a chave de transmissão no campo "Chave de Transmissão"</p>
-              <p>3. <strong>Bitrate:</strong> Configure o bitrate máximo de {obsConfig.max_bitrate} kbps</p>
+              <p>3. <strong>Bitrate:</strong> Configure o bitrate máximo de {userLimits?.bitrate.max || obsConfig.max_bitrate} kbps</p>
               <p>4. <strong>Resolução:</strong> Recomendado 1080p ou 720p</p>
               <p>5. Clique em "Iniciar Transmissão" no OBS</p>
+              <p className="text-red-700 font-medium">⚠️ IMPORTANTE: Não exceda o bitrate de {userLimits?.bitrate.max || obsConfig.max_bitrate} kbps do seu plano!</p>
             </div>
           </div>
         </div>
@@ -837,6 +886,11 @@ const DadosConexao: React.FC = () => {
           <p className="text-blue-800 text-sm">
             O sistema está configurado para receber transmissões via OBS, realizar transmissões diretas do painel,
             salvar vídeos no servidor Wowza e respeitar todos os limites de bitrate e espectadores do seu plano.
+            {userLimits && (
+              <span className="block mt-2 font-medium">
+                Seu plano: {userLimits.bitrate.max} kbps • {userLimits.viewers.max} espectadores • {userLimits.storage.max}MB armazenamento
+              </span>
+            )}
           </p>
         </div>
       </div>

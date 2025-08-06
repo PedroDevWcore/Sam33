@@ -95,32 +95,8 @@ const UniversalVideoPlayer: React.FC<UniversalVideoPlayerProps> = ({
       return src;
     }
 
-    // Para vídeos locais, construir URL HLS correta
+    // Para vídeos locais, sempre usar o proxy /content do backend
     const cleanPath = src.replace(/^\/+/, ''); // Remove barras iniciais
-    const pathParts = cleanPath.split('/');
-    
-    if (pathParts.length >= 3) {
-      const userLogin = pathParts[0];
-      const folderName = pathParts[1];
-      const fileName = pathParts[2];
-      
-      // Verificar se é MP4 ou precisa de conversão
-      const fileExtension = fileName.split('.').pop()?.toLowerCase();
-      const needsConversion = !['mp4'].includes(fileExtension || '');
-      
-      // Nome do arquivo final (MP4)
-      const finalFileName = needsConversion ? 
-        fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
-      
-      // Construir URL HLS correta com formato Wowza
-      const isProduction = window.location.hostname !== 'localhost';
-      const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-      const hlsUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
-      
-      return hlsUrl;
-    }
-    
-    // Para arquivos locais, sempre usar o proxy /content do backend
     return `/content/${cleanPath}`;
   };
 

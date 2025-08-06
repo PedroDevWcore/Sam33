@@ -32,6 +32,18 @@ router.get('/obs-config', authMiddleware, async (req, res) => {
     const userConfig = userConfigRows[0];
     const serverId = userConfig.codigo_servidor || 1;
 
+    // Buscar informações do servidor
+    const [serverRows] = await db.execute(
+      `SELECT 
+        codigo, nome, limite_streamings, streamings_ativas, 
+        load_cpu, tipo_servidor, status
+       FROM wowza_servers 
+       WHERE codigo = ?`,
+      [serverId]
+    );
+
+    const serverInfo = serverRows.length > 0 ? serverRows[0] : null;
+
     // Inicializar serviço Wowza
     const wowzaService = new WowzaStreamingService();
     const initialized = await wowzaService.initializeFromDatabase(userId);
@@ -43,14 +55,14 @@ router.get('/obs-config', authMiddleware, async (req, res) => {
           rtmp_url: `rtmp://samhost.wcore.com.br:1935/samhost`,
           stream_key: `${userLogin}_live`,
           hls_url: `http://samhost.wcore.com.br:1935/samhost/${userLogin}_live/playlist.m3u8`,
-          max_bitrate: userConfig.bitrate || 2500,
+          max_bitrate: Math.min(userConfig.bitrate || 2500, userConfig.bitrate || 2500),
           max_viewers: userConfig.espectadores || 100,
           recording_enabled: userConfig.status_gravando === 'sim',
           recording_path: `/usr/local/WowzaStreamingEngine/content/${userLogin}/recordings/`
         },
         user_limits: null,
         warnings: [],
-        server_info: null
+        server_info: serverInfo
       });
     }
 
@@ -62,10 +74,16 @@ router.get('/obs-config', authMiddleware, async (req, res) => {
       console.warn('Aviso: Erro ao verificar/criar diretório do usuário:', dirError.message);
     }
     // Configurar stream OBS
+    // Verificar se há bitrate solicitado na requisição
+    const requestedBitrate = req.query.bitrate ? parseInt(req.query.bitrate) : null;
+
     const obsResult = await wowzaService.startOBSStream({
       userId,
       userLogin,
-      userConfig,
+      userConfig: {
+        ...userConfig,
+        requested_bitrate: requestedBitrate
+      },
       platforms: [] // Plataformas serão configuradas separadamente
     });
 
@@ -77,7 +95,7 @@ router.get('/obs-config', authMiddleware, async (req, res) => {
     }
 
     // Verificar limites do usuário
-    const limitsCheck = await wowzaService.checkUserLimits(userConfig);
+    const limitsCheck = await wowzaService.checkUserLimits(userConfig, requestedBitrate);
 
     res.json({
       success: true,
@@ -85,14 +103,14 @@ router.get('/obs-config', authMiddleware, async (req, res) => {
         rtmp_url: obsResult.data.rtmpUrl,
         stream_key: obsResult.data.streamKey,
         hls_url: obsResult.data.hlsUrl,
-        max_bitrate: userConfig.bitrate,
+        max_bitrate: obsResult.data.maxBitrate,
         max_viewers: userConfig.espectadores,
         recording_enabled: userConfig.status_gravando === 'sim',
         recording_path: obsResult.data.recordingPath
       },
       user_limits: limitsCheck.success ? limitsCheck.limits : null,
       warnings: limitsCheck.success ? limitsCheck.warnings : [],
-      server_info: obsResult.data.serverInfo
+      server_info: serverInfo
     });
   } catch (error) {
     console.error('Erro ao obter configuração OBS:', error);

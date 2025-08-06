@@ -257,6 +257,23 @@ class WowzaStreamingService {
                 throw new Error('Falha ao configurar aplicação no Wowza');
             }
 
+            // Verificar e aplicar limite de bitrate do usuário
+            const maxBitrate = userConfig.bitrate || 2500;
+            const streamKey = `${userLogin}_live`;
+            
+            // Configurar stream com limite de bitrate
+            const streamConfig = {
+                name: streamKey,
+                sourceStreamName: streamKey,
+                applicationName: applicationName,
+                streamType: 'live',
+                recordingEnabled: userConfig.status_gravando === 'sim',
+                recordingPath: `/usr/local/WowzaStreamingEngine/content/${userLogin}/recordings/`,
+                maxBitrate: maxBitrate,
+                maxViewers: userConfig.espectadores || 100,
+                enforceMaxBitrate: true // Forçar limite de bitrate
+            };
+
             // Garantir que o diretório do usuário existe no servidor
             try {
                 await SSHManager.createUserDirectory(this.serverId, userLogin);
@@ -268,25 +285,34 @@ class WowzaStreamingService {
             // Configurar aplicação VOD se não existir
             await this.ensureVODApplication();
             
-            // Configurar stream de entrada para o usuário
-            const streamConfig = {
-                name: `${userLogin}_live`,
-                sourceStreamName: `${userLogin}_live`,
-                applicationName: applicationName,
-                streamType: 'live',
-                recordingEnabled: true,
-                recordingPath: `/usr/local/WowzaStreamingEngine/content/${userLogin}/recordings/`,
-                maxBitrate: userConfig.bitrate || 2500,
-                maxViewers: userConfig.espectadores || 100
-            };
+            // Configurar limite de bitrate no Wowza (se suportado)
+            try {
+                const bitrateLimit = {
+                    streamName: streamKey,
+                    maxBitrate: maxBitrate,
+                    action: 'reject' // Rejeitar se exceder o limite
+                };
+                
+                await this.makeWowzaRequest(
+                    `/applications/${applicationName}/instances/_definst_/incomingstreams/${streamKey}/actions/setBitrateLimit`,
+                    'PUT',
+                    bitrateLimit
+                );
+                
+                console.log(`✅ Limite de bitrate configurado: ${maxBitrate} kbps para ${streamKey}`);
+            } catch (bitrateError) {
+                console.warn('Aviso: Não foi possível configurar limite de bitrate no Wowza:', bitrateError.message);
+            }
 
             return {
                 success: true,
                 rtmpUrl: `rtmp://${this.wowzaHost}:1935/samhost`,
-                streamKey: `${userLogin}_live`,
+                streamKey: streamKey,
                 hlsUrl: `http://${this.wowzaHost}:1935/samhost/${userLogin}_live/playlist.m3u8`,
                 recordingPath: streamConfig.recordingPath,
-                config: streamConfig
+                config: streamConfig,
+                maxBitrate: maxBitrate,
+                bitrateEnforced: true
             };
         } catch (error) {
             console.error('Erro ao configurar aplicação OBS:', error);
@@ -604,6 +630,16 @@ class WowzaStreamingService {
         try {
             console.log(`Configurando stream OBS para usuário: ${userLogin}`);
 
+            // Verificar e validar bitrate do usuário
+            const maxBitrate = userConfig.bitrate || 2500;
+            const requestedBitrate = userConfig.requested_bitrate || maxBitrate;
+            
+            if (requestedBitrate > maxBitrate) {
+                console.warn(`⚠️ Bitrate solicitado (${requestedBitrate}) excede o limite (${maxBitrate}). Aplicando limite.`);
+            }
+            
+            const allowedBitrate = Math.min(requestedBitrate, maxBitrate);
+
             // Verificar se o servidor ainda tem capacidade
             if (this.serverInfo) {
                 if (this.serverInfo.streamings_ativas >= this.serverInfo.limite_streamings) {
@@ -616,7 +652,10 @@ class WowzaStreamingService {
             }
 
             // Configurar aplicação para receber stream do OBS
-            const obsResult = await this.setupOBSApplication(userLogin, userConfig);
+            const obsResult = await this.setupOBSApplication(userLogin, {
+                ...userConfig,
+                bitrate: allowedBitrate
+            });
             if (!obsResult.success) {
                 throw new Error('Falha ao configurar aplicação para OBS');
             }
@@ -624,7 +663,10 @@ class WowzaStreamingService {
             // Configurar push para plataformas se fornecidas
             let pushResults = [];
             if (platforms.length > 0) {
-                pushResults = await this.setupMultiPlatformPush(`${userLogin}_live`, platforms, userConfig);
+                pushResults = await this.setupMultiPlatformPush(`${userLogin}_live`, platforms, {
+                    ...userConfig,
+                    bitrate: allowedBitrate
+                });
             }
 
             // Atualizar contador de streamings ativas no servidor
@@ -643,7 +685,9 @@ class WowzaStreamingService {
                 platforms: pushResults,
                 serverId: this.serverId,
                 type: 'obs',
-                recording: userConfig.gravar_stream !== 'nao'
+                recording: userConfig.gravar_stream !== 'nao',
+                maxBitrate: allowedBitrate,
+                bitrateEnforced: true
             });
 
             return {
@@ -655,7 +699,7 @@ class WowzaStreamingService {
                     recordingPath: obsResult.recordingPath,
                     pushResults,
                     serverInfo: this.serverInfo,
-                    maxBitrate: userConfig.bitrate || 2500,
+                    maxBitrate: allowedBitrate,
                     maxViewers: userConfig.espectadores || 100
                 }
             };
@@ -963,7 +1007,13 @@ class WowzaStreamingService {
                 warnings.push('Espaço de armazenamento quase esgotado');
             }
             if (requestedBitrate && requestedBitrate > maxBitrate) {
-                warnings.push(`Bitrate solicitado (${requestedBitrate}) excede o limite (${maxBitrate})`);
+                warnings.push(`Bitrate solicitado (${requestedBitrate} kbps) excede o limite do plano (${maxBitrate} kbps). Será limitado automaticamente.`);
+            }
+            if (this.serverInfo && this.serverInfo.streamings_ativas >= this.serverInfo.limite_streamings * 0.9) {
+                warnings.push('Servidor próximo do limite de capacidade');
+            }
+            if (this.serverInfo && this.serverInfo.load_cpu > 80) {
+                warnings.push('Servidor com alta carga de CPU');
             }
 
             return {

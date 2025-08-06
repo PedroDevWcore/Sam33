@@ -96,10 +96,18 @@ router.get('/', authMiddleware, async (req, res) => {
     console.log(`📊 Encontrados ${rows.length} vídeos no banco`);
 
     const videos = rows.map(video => {
-      // Garantir que a URL está no formato correto para o proxy
-      const cleanPath = video.url.replace(/^\/+/, ''); // Remove barras iniciais
-      const url = cleanPath;
-      console.log(`🎥 Vídeo: ${video.nome} -> URL: /content/${url}`);
+      // Construir URL correta baseada no caminho do banco
+      let url = video.url;
+      
+      // Se o path_video já contém o caminho completo do servidor, extrair apenas a parte relativa
+      if (url.includes('/usr/local/WowzaStreamingEngine/content/')) {
+        const relativePath = url.replace('/usr/local/WowzaStreamingEngine/content/', '');
+        url = relativePath;
+      } else if (url.startsWith('/')) {
+        url = url.substring(1); // Remove barra inicial
+      }
+      
+      console.log(`🎥 Vídeo: ${video.nome} -> URL: ${url}`);
       
       return {
         id: video.id,
@@ -107,7 +115,6 @@ router.get('/', authMiddleware, async (req, res) => {
         url,
         duracao: video.duracao,
         tamanho: video.tamanho,
-        originalPath: video.url,
         folder: folderName,
         user: userLogin
       };
