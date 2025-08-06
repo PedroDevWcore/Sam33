@@ -726,7 +726,84 @@ router.put('/:videoId/rename', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Novo nome é obrigatório' });
     }
 
-    // Decodificar videoId
+    // Para renomear, precisamos buscar o vídeo no banco primeiro
+    const [videoRows] = await db.execute(
+      'SELECT path_video, video FROM playlists_videos WHERE codigo = ?',
+      [videoId]
+    );
+
+    if (videoRows.length === 0) {
+      return res.status(404).json({ error: 'Vídeo não encontrado' });
+    }
+
+    const video = videoRows[0];
+    let remotePath = video.path_video;
+
+    // Se o path_video contém o caminho completo do servidor, usar como está
+    if (!remotePath.startsWith('/usr/local/WowzaStreamingEngine/content/')) {
+      // Se não, construir o caminho completo
+      remotePath = `/usr/local/WowzaStreamingEngine/content/${remotePath}`;
+    }
+
+    // Verificar se o caminho pertence ao usuário
+    if (!remotePath.includes(`/${userLogin}/`)) {
+      return res.status(403).json({ error: 'Acesso negado ao vídeo' });
+    }
+
+    // Buscar servidor do usuário
+    const [serverRows] = await db.execute(
+      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
+      [userId]
+    );
+
+    const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
+
+    // Construir novo caminho
+    const directory = path.dirname(remotePath);
+    const extension = path.extname(remotePath);
+    const newRemotePath = path.join(directory, `${novo_nome}${extension}`);
+
+    // Renomear arquivo no servidor
+    const command = `mv "${remotePath}" "${newRemotePath}"`;
+    await SSHManager.executeCommand(serverId, command);
+
+    // Atualizar nome no banco de dados
+    await db.execute(
+      'UPDATE playlists_videos SET video = ?, path_video = ? WHERE codigo = ?',
+      [novo_nome, newRemotePath, videoId]
+    );
+
+    console.log(`✅ Vídeo renomeado: ${remotePath} -> ${newRemotePath}`);
+
+    res.json({
+      success: true,
+      message: 'Vídeo renomeado com sucesso',
+      new_path: newRemotePath,
+      new_name: novo_nome
+    });
+  } catch (error) {
+    console.error('Erro ao renomear vídeo:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Erro ao renomear vídeo no servidor',
+      details: error.message 
+    });
+  }
+});
+
+// PUT /api/videos-ssh/rename-by-path/:videoId - Renomear vídeo por caminho SSH
+router.put('/rename-by-path/:videoId', authMiddleware, async (req, res) => {
+  try {
+    const videoId = req.params.videoId;
+    const { novo_nome } = req.body;
+    const userId = req.user.id;
+    const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
+
+    if (!novo_nome) {
+      return res.status(400).json({ error: 'Novo nome é obrigatório' });
+    }
+
+    // Decodificar videoId (base64)
     let remotePath;
     try {
       remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
@@ -755,6 +832,12 @@ router.put('/:videoId/rename', authMiddleware, async (req, res) => {
     // Renomear arquivo no servidor
     const command = `mv "${remotePath}" "${newRemotePath}"`;
     await SSHManager.executeCommand(serverId, command);
+
+    // Atualizar no banco de dados também
+    await db.execute(
+      'UPDATE playlists_videos SET video = ?, path_video = ? WHERE path_video = ?',
+      [novo_nome, newRemotePath, remotePath]
+    );
 
     console.log(`✅ Vídeo renomeado: ${remotePath} -> ${newRemotePath}`);
 
@@ -927,4 +1010,4 @@ router.post('/folders/:folderId/sync', authMiddleware, async (req, res) => {
   }
 });
 
-module.exports = router;
+module.router;
