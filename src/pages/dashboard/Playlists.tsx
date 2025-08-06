@@ -556,30 +556,8 @@ const Playlists: React.FC = () => {
       // Otimizar URL do primeiro vídeo
       let firstVideoUrl = buildVideoUrl(videos[0].url || '');
       
-      // Para vídeos SSH, construir URL HLS para melhor performance
-      if (videos[0].url && videos[0].url.includes('/api/videos-ssh/')) {
-        const videoId = videos[0].url.split('/stream/')[1]?.split('?')[0];
-        if (videoId) {
-          try {
-            const remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
-            const isProduction = window.location.hostname !== 'localhost';
-            const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-            
-            // Extrair informações do caminho
-            const pathParts = remotePath.split('/');
-            const userLogin = pathParts[pathParts.length - 3];
-            const folderName = pathParts[pathParts.length - 2];
-            const fileName = pathParts[pathParts.length - 1];
-            
-            // URL HLS para streaming fluido
-            firstVideoUrl = `http://${wowzaHost}:1935/vod/${userLogin}/${folderName}/${fileName}/playlist.m3u8`;
-          } catch (error) {
-            console.warn('Erro ao construir URL HLS, usando otimizada:', error);
-            firstVideoUrl = buildOptimizedSSHUrl(firstVideoUrl);
-          }
-        }
-      } else if (!firstVideoUrl.startsWith('http')) {
-        // Para outros vídeos, tentar construir URL HLS também
+      // Construir URL HLS correta para todos os vídeos
+      if (!firstVideoUrl.startsWith('http')) {
         const cleanPath = firstVideoUrl.replace(/^\/content\//, '').replace(/^\/+/, '');
         const pathParts = cleanPath.split('/');
         
@@ -588,9 +566,17 @@ const Playlists: React.FC = () => {
           const folderName = pathParts[1];
           const fileName = pathParts[2];
           
+          // Verificar se é MP4 ou precisa de conversão
+          const fileExtension = fileName.split('.').pop()?.toLowerCase();
+          const needsConversion = !['mp4'].includes(fileExtension || '');
+          
+          // Nome do arquivo final (MP4)
+          const finalFileName = needsConversion ? 
+            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+          
           const isProduction = window.location.hostname !== 'localhost';
           const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-          firstVideoUrl = `http://${wowzaHost}:1935/vod/${userLogin}/${folderName}/${fileName}/playlist.m3u8`;
+          firstVideoUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
         }
       }
       
@@ -607,20 +593,62 @@ const Playlists: React.FC = () => {
       const nextIndex = playlistPlayerIndex + 1;
       setPlaylistPlayerIndex(nextIndex);
       
-      // Construir URL HLS para o próximo vídeo
+      // Construir URL HLS correta para o próximo vídeo
       let nextVideoUrl = buildVideoUrl(playlistVideosToPlay[nextIndex].url || '');
-      if (nextVideoUrl.includes('/api/videos-ssh/')) {
-        nextVideoUrl = buildOptimizedSSHUrl(nextVideoUrl);
+      
+      if (!nextVideoUrl.startsWith('http')) {
+        const cleanPath = nextVideoUrl.replace(/^\/content\//, '').replace(/^\/+/, '');
+        const pathParts = cleanPath.split('/');
+        
+        if (pathParts.length >= 3) {
+          const userLogin = pathParts[0];
+          const folderName = pathParts[1];
+          const fileName = pathParts[2];
+          
+          // Verificar se é MP4 ou precisa de conversão
+          const fileExtension = fileName.split('.').pop()?.toLowerCase();
+          const needsConversion = !['mp4'].includes(fileExtension || '');
+          
+          // Nome do arquivo final (MP4)
+          const finalFileName = needsConversion ? 
+            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+          
+          const isProduction = window.location.hostname !== 'localhost';
+          const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+          nextVideoUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
+        }
       }
+      
       setCurrentVideoUrl(nextVideoUrl);
     } else {
       // Repetir playlist do início
       setPlaylistPlayerIndex(0);
       
       let firstVideoUrl = buildVideoUrl(playlistVideosToPlay[0].url || '');
-      if (firstVideoUrl.includes('/api/videos-ssh/')) {
-        firstVideoUrl = buildOptimizedSSHUrl(firstVideoUrl);
+      
+      if (!firstVideoUrl.startsWith('http')) {
+        const cleanPath = firstVideoUrl.replace(/^\/content\//, '').replace(/^\/+/, '');
+        const pathParts = cleanPath.split('/');
+        
+        if (pathParts.length >= 3) {
+          const userLogin = pathParts[0];
+          const folderName = pathParts[1];
+          const fileName = pathParts[2];
+          
+          // Verificar se é MP4 ou precisa de conversão
+          const fileExtension = fileName.split('.').pop()?.toLowerCase();
+          const needsConversion = !['mp4'].includes(fileExtension || '');
+          
+          // Nome do arquivo final (MP4)
+          const finalFileName = needsConversion ? 
+            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+          
+          const isProduction = window.location.hostname !== 'localhost';
+          const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+          firstVideoUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
+        }
       }
+      
       setCurrentVideoUrl(firstVideoUrl);
     }
   };
@@ -631,9 +659,30 @@ const Playlists: React.FC = () => {
       setPlaylistPlayerIndex(prevIndex);
       
       let prevVideoUrl = buildVideoUrl(playlistVideosToPlay[prevIndex].url || '');
-      if (prevVideoUrl.includes('/api/videos-ssh/')) {
-        prevVideoUrl = buildOptimizedSSHUrl(prevVideoUrl);
+      
+      if (!prevVideoUrl.startsWith('http')) {
+        const cleanPath = prevVideoUrl.replace(/^\/content\//, '').replace(/^\/+/, '');
+        const pathParts = cleanPath.split('/');
+        
+        if (pathParts.length >= 3) {
+          const userLogin = pathParts[0];
+          const folderName = pathParts[1];
+          const fileName = pathParts[2];
+          
+          // Verificar se é MP4 ou precisa de conversão
+          const fileExtension = fileName.split('.').pop()?.toLowerCase();
+          const needsConversion = !['mp4'].includes(fileExtension || '');
+          
+          // Nome do arquivo final (MP4)
+          const finalFileName = needsConversion ? 
+            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+          
+          const isProduction = window.location.hostname !== 'localhost';
+          const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+          prevVideoUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
+        }
       }
+      
       setCurrentVideoUrl(prevVideoUrl);
     }
   };
@@ -644,9 +693,30 @@ const Playlists: React.FC = () => {
       setPlaylistPlayerIndex(nextIndex);
       
       let nextVideoUrl = buildVideoUrl(playlistVideosToPlay[nextIndex].url || '');
-      if (nextVideoUrl.includes('/api/videos-ssh/')) {
-        nextVideoUrl = buildOptimizedSSHUrl(nextVideoUrl);
+      
+      if (!nextVideoUrl.startsWith('http')) {
+        const cleanPath = nextVideoUrl.replace(/^\/content\//, '').replace(/^\/+/, '');
+        const pathParts = cleanPath.split('/');
+        
+        if (pathParts.length >= 3) {
+          const userLogin = pathParts[0];
+          const folderName = pathParts[1];
+          const fileName = pathParts[2];
+          
+          // Verificar se é MP4 ou precisa de conversão
+          const fileExtension = fileName.split('.').pop()?.toLowerCase();
+          const needsConversion = !['mp4'].includes(fileExtension || '');
+          
+          // Nome do arquivo final (MP4)
+          const finalFileName = needsConversion ? 
+            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+          
+          const isProduction = window.location.hostname !== 'localhost';
+          const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+          nextVideoUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
+        }
       }
+      
       setCurrentVideoUrl(nextVideoUrl);
     }
   };

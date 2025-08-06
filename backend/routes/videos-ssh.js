@@ -52,6 +52,37 @@ router.get('/proxy-stream/:videoId', async (req, res) => {
       return res.status(403).json({ error: 'Acesso negado ao vídeo' });
     }
 
+    // Verificar se precisa converter para MP4
+    const fileExtension = path.extname(remotePath).toLowerCase();
+    const needsConversion = !['.mp4'].includes(fileExtension);
+    
+    let finalPath = remotePath;
+    if (needsConversion) {
+      finalPath = remotePath.replace(/\.[^/.]+$/, '.mp4');
+      
+      // Verificar se arquivo MP4 já existe
+      const mp4Exists = await SSHManager.getFileInfo(serverId, finalPath);
+      if (!mp4Exists.exists) {
+        // Converter arquivo para MP4
+        console.log(`🔄 Convertendo ${path.basename(remotePath)} para MP4...`);
+        const ffmpegCommand = `ffmpeg -i "${remotePath}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k -movflags +faststart "${finalPath}" -y 2>/dev/null && echo "CONVERSION_SUCCESS" || echo "CONVERSION_ERROR"`;
+        
+        try {
+          const conversionResult = await SSHManager.executeCommand(serverId, ffmpegCommand);
+          
+          if (!conversionResult.stdout.includes('CONVERSION_SUCCESS')) {
+            console.warn(`⚠️ Conversão falhou, usando arquivo original: ${remotePath}`);
+            finalPath = remotePath;
+          } else {
+            console.log(`✅ Conversão concluída: ${finalPath}`);
+          }
+        } catch (conversionError) {
+          console.warn('Erro na conversão, usando arquivo original:', conversionError.message);
+          finalPath = remotePath;
+        }
+      }
+    }
+
     // Buscar servidor do usuário
     const [serverRows] = await db.execute(
       'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
@@ -68,7 +99,7 @@ router.get('/proxy-stream/:videoId', async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
     
     // Definir Content-Type
-    const extension = path.extname(remotePath).toLowerCase();
+    const extension = path.extname(finalPath).toLowerCase();
     switch (extension) {
       case '.mp4': res.setHeader('Content-Type', 'video/mp4'); break;
       case '.avi': res.setHeader('Content-Type', 'video/x-msvideo'); break;
@@ -84,7 +115,7 @@ router.get('/proxy-stream/:videoId', async (req, res) => {
     const { conn } = await SSHManager.getConnection(serverId);
     
     // Obter tamanho do arquivo
-    const sizeCommand = `stat -c%s "${remotePath}" 2>/dev/null || echo "0"`;
+    const sizeCommand = `stat -c%s "${finalPath}" 2>/dev/null || echo "0"`;
     const sizeResult = await SSHManager.executeCommand(serverId, sizeCommand);
     const fileSize = parseInt(sizeResult.stdout.trim()) || 0;
     
@@ -109,8 +140,8 @@ router.get('/proxy-stream/:videoId', async (req, res) => {
       
       // Stream otimizado com range
       const command = isLargeFile ? 
-        `dd if="${remotePath}" bs=64k skip=${Math.floor(start/65536)} count=${Math.ceil(chunksize/65536)} 2>/dev/null | dd bs=1 skip=${start%65536} count=${chunksize} 2>/dev/null` :
-        `dd if="${remotePath}" bs=1 skip=${start} count=${chunksize} 2>/dev/null`;
+        `dd if="${finalPath}" bs=64k skip=${Math.floor(start/65536)} count=${Math.ceil(chunksize/65536)} 2>/dev/null | dd bs=1 skip=${start%65536} count=${chunksize} 2>/dev/null` :
+        `dd if="${finalPath}" bs=1 skip=${start} count=${chunksize} 2>/dev/null`;
         
       conn.exec(command, (err, stream) => {
         if (err) {
@@ -136,7 +167,7 @@ router.get('/proxy-stream/:videoId', async (req, res) => {
       res.setHeader('Content-Length', fileSize);
       
       // Para arquivos grandes, usar comando otimizado
-      const command = isLargeFile ? `dd if="${remotePath}" bs=64k 2>/dev/null` : `cat "${remotePath}"`;
+      const command = isLargeFile ? `dd if="${finalPath}" bs=64k 2>/dev/null` : `cat "${finalPath}"`;
       
       conn.exec(command, (err, stream) => {
         if (err) {

@@ -90,15 +90,42 @@ class VideoSSHManager {
                     console.warn(`Não foi possível obter duração de ${fileName}`);
                 }
 
-                // Construir URL HLS para o vídeo
+                // Verificar se precisa converter para MP4
+                const fileExtension = path.extname(fileName).toLowerCase();
+                const needsConversion = !['.mp4'].includes(fileExtension);
+                
+                // Nome do arquivo MP4 convertido
+                const mp4FileName = needsConversion ? 
+                    fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+                
+                // Caminho do arquivo MP4 (convertido ou original)
+                const mp4Path = needsConversion ? 
+                    fullPath.replace(/\.[^/.]+$/, '.mp4') : fullPath;
+                
+                // Se precisa converter, fazer a conversão
+                if (needsConversion) {
+                    await this.convertVideoToMp4(serverId, fullPath, mp4Path);
+                }
+                
+                // Construir URL HLS correta para o Wowza
                 const isProduction = process.env.NODE_ENV === 'production';
                 const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-                const hlsUrl = `http://${wowzaHost}:1935/vod/${userLogin}/${folderPath === '.' ? '' : folderPath + '/'}${fileName}/playlist.m3u8`;
+                
+                // Construir caminho relativo para o Wowza (sem a pasta content)
+                const relativeMp4Path = mp4Path.replace('/usr/local/WowzaStreamingEngine/content/', '');
+                
+                // URL HLS correta com formato Wowza: /vod/_definst_/mp4:caminho/playlist.m3u8
+                const hlsUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${relativeMp4Path}/playlist.m3u8`;
+                
                 videos.push({
                     id: Buffer.from(fullPath).toString('base64'), // ID único baseado no caminho
                     nome: fileName,
                     path: relativePath,
                     fullPath: fullPath,
+                    mp4Path: mp4Path,
+                    mp4FileName: mp4FileName,
+                    needsConversion: needsConversion,
+                    converted: needsConversion ? await this.checkFileExists(serverId, mp4Path) : true,
                     folder: folderPath === '.' ? 'root' : folderPath,
                     size: size,
                     duration: duration,
@@ -107,7 +134,8 @@ class VideoSSHManager {
                     serverId: serverId,
                     userLogin: userLogin,
                     hlsUrl: hlsUrl,
-                    vodUrl: `http://${wowzaHost}:6980/content/${userLogin}/${folderPath === '.' ? '' : folderPath + '/'}${fileName}`
+                    vodUrl: `http://${wowzaHost}:6980/content/${relativeMp4Path}`,
+                    originalFormat: fileExtension
                 });
             }
 
@@ -713,30 +741,90 @@ class VideoSSHManager {
         }
     }
 
+    // Método para converter vídeo para MP4
+    async convertVideoToMp4(serverId, inputPath, outputPath) {
+        try {
+            // Verificar se arquivo MP4 já existe
+            const mp4Exists = await this.checkFileExists(serverId, outputPath);
+            if (mp4Exists) {
+                console.log(`✅ Arquivo MP4 já existe: ${outputPath}`);
+                return { success: true, alreadyExists: true };
+            }
+
+            console.log(`🔄 Convertendo vídeo para MP4: ${inputPath} -> ${outputPath}`);
+            
+            // Comando FFmpeg para conversão otimizada
+            const ffmpegCommand = `ffmpeg -i "${inputPath}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k -movflags +faststart "${outputPath}" -y 2>/dev/null && echo "CONVERSION_SUCCESS" || echo "CONVERSION_ERROR"`;
+            
+            const result = await SSHManager.executeCommand(serverId, ffmpegCommand);
+            
+            if (result.stdout.includes('CONVERSION_SUCCESS')) {
+                console.log(`✅ Conversão concluída: ${outputPath}`);
+                
+                // Definir permissões do arquivo convertido
+                await SSHManager.executeCommand(serverId, `chmod 644 "${outputPath}"`);
+                
+                return { success: true, converted: true };
+            } else {
+                console.error(`❌ Erro na conversão: ${inputPath}`);
+                return { success: false, error: 'Falha na conversão FFmpeg' };
+            }
+            
+        } catch (error) {
+            console.error('Erro ao converter vídeo:', error);
+            return { success: false, error: error.message };
+        }
+    }
+
+    // Método para verificar se arquivo existe
+    async checkFileExists(serverId, filePath) {
+        try {
+            const command = `test -f "${filePath}" && echo "EXISTS" || echo "NOT_EXISTS"`;
+            const result = await SSHManager.executeCommand(serverId, command);
+            return result.stdout.includes('EXISTS');
+        } catch (error) {
+            return false;
+        }
+    }
+
     // Método para obter URL de streaming otimizada
     async getOptimizedStreamUrl(serverId, remotePath, userLogin) {
         try {
-            const fileName = path.basename(remotePath);
-            const folderPath = path.dirname(remotePath).split('/').pop();
+            // Verificar se é arquivo MP4 ou precisa de conversão
+            const fileExtension = path.extname(remotePath).toLowerCase();
+            const needsConversion = !['.mp4'].includes(fileExtension);
+            
+            let finalPath = remotePath;
+            if (needsConversion) {
+                finalPath = remotePath.replace(/\.[^/.]+$/, '.mp4');
+                // Verificar se conversão já foi feita
+                const mp4Exists = await this.checkFileExists(serverId, finalPath);
+                if (!mp4Exists) {
+                    await this.convertVideoToMp4(serverId, remotePath, finalPath);
+                }
+            }
+            
+            const fileName = path.basename(finalPath);
+            const relativePath = finalPath.replace('/usr/local/WowzaStreamingEngine/content/', '');
             
             // Construir URLs baseadas no ambiente
             const isProduction = process.env.NODE_ENV === 'production';
             const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
             
-            // URL direta do Wowza (porta 6980 para VOD)
-            const directUrl = `http://${wowzaHost}:6980/content/${userLogin}/${folderPath}/${fileName}`;
+            // URL direta do Wowza (porta 6980 para VOD) 
+            const directUrl = `http://${wowzaHost}:6980/content/${relativePath}`;
             
-            // URL HLS se disponível
-            const hlsUrl = `http://${wowzaHost}:1935/vod/${userLogin}/${folderPath}/${fileName}/playlist.m3u8`;
+            // URL HLS correta com formato Wowza
+            const hlsUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${relativePath}/playlist.m3u8`;
             
             // URL via proxy do backend
-            const proxyUrl = `/content/${userLogin}/${folderPath}/${fileName}`;
+            const proxyUrl = `/content/${relativePath}`;
             
             return {
                 direct: directUrl,
                 hls: hlsUrl,
                 proxy: proxyUrl,
-                ssh: `/api/videos-ssh/stream/${Buffer.from(remotePath).toString('base64')}`
+                ssh: `/api/videos-ssh/stream/${Buffer.from(finalPath).toString('base64')}`
             };
         } catch (error) {
             console.error('Erro ao gerar URLs:', error);

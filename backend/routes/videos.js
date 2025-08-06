@@ -207,11 +207,6 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     // Nome do vídeo para salvar no banco
     const videoTitle = req.file.originalname;
 
-    // Construir URLs do Wowza para o vídeo
-    const isProduction = process.env.NODE_ENV === 'production';
-    const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-    const hlsUrl = `http://${wowzaHost}:1935/vod${relativePath}/playlist.m3u8`;
-    const vodUrl = `http://${wowzaHost}:6980/content${relativePath}`;
     const [result] = await db.execute(
       `INSERT INTO playlists_videos (
         codigo_playlist, path_video, video, width, height,
@@ -227,12 +222,55 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
 
     console.log(`✅ Vídeo salvo no banco com ID: ${result.insertId}`);
 
+    // Construir URLs do Wowza para resposta
+    const isProduction = process.env.NODE_ENV === 'production';
+    const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+    
+    // Verificar se precisa converter para MP4
+    const fileExtension = path.extname(req.file.filename).toLowerCase();
+    const needsConversion = !['.mp4'].includes(fileExtension);
+    
+    let finalFileName = req.file.filename;
+    let finalRemotePath = remotePath;
+    
+    // Se precisa converter, fazer conversão para MP4
+    if (needsConversion) {
+      const mp4FileName = req.file.filename.replace(/\.[^/.]+$/, '.mp4');
+      const mp4RemotePath = `/usr/local/WowzaStreamingEngine/content/${userLogin}/${folderName}/${mp4FileName}`;
+      
+      console.log(`🔄 Convertendo ${req.file.filename} para MP4...`);
+      
+      // Comando FFmpeg para conversão
+      const ffmpegCommand = `ffmpeg -i "${remotePath}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k -movflags +faststart "${mp4RemotePath}" -y 2>/dev/null && echo "CONVERSION_SUCCESS" || echo "CONVERSION_ERROR"`;
+      
+      try {
+        const conversionResult = await SSHManager.executeCommand(serverId, ffmpegCommand);
+        
+        if (conversionResult.stdout.includes('CONVERSION_SUCCESS')) {
+          console.log(`✅ Conversão concluída: ${mp4FileName}`);
+          finalFileName = mp4FileName;
+          finalRemotePath = mp4RemotePath;
+        } else {
+          console.warn(`⚠️ Conversão falhou, usando arquivo original: ${req.file.filename}`);
+        }
+      } catch (conversionError) {
+        console.warn('Erro na conversão, usando arquivo original:', conversionError.message);
+      }
+    }
+    
+    // Construir URLs corretas
+    const relativePath = `${userLogin}/${folderName}/${finalFileName}`;
+    const hlsUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${relativePath}/playlist.m3u8`;
+    const vodUrl = `http://${wowzaHost}:6980/content/${relativePath}`;
+
     res.status(201).json({
       id: result.insertId,
       nome: videoTitle,
       url: hlsUrl,
       vodUrl: vodUrl,
-      path: remotePath,
+      path: finalRemotePath,
+      originalFile: remotePath,
+      converted: needsConversion,
       duracao,
       tamanho
     });

@@ -153,12 +153,50 @@
       
       let wowzaUrl;
       if (isStreamFile) {
-        // Para streams HLS/DASH - usar porta 1935
-        wowzaUrl = `http://${wowzaHost}:1935${requestPath}`;
+        // Para streams HLS/DASH - usar porta 1935 com formato correto
+        // Converter /content/user/folder/video.ext para /vod/_definst_/mp4:user/folder/video.mp4
+        const cleanPath = requestPath.replace('/content/', '');
+        const pathParts = cleanPath.split('/');
+        
+        if (pathParts.length >= 3) {
+          const userLogin = pathParts[0];
+          const folderName = pathParts[1];
+          const fileName = pathParts[2];
+          
+          // Verificar se é MP4 ou precisa de conversão
+          const fileExtension = path.extname(fileName).toLowerCase();
+          const needsConversion = !['.mp4'].includes(fileExtension);
+          
+          // Nome do arquivo final (MP4)
+          const finalFileName = needsConversion ? 
+            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+          
+          wowzaUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
+        } else {
+          wowzaUrl = `http://${wowzaHost}:1935${requestPath}`;
+        }
       } else {
-        // Para arquivos de vídeo - usar porta 6980 com autenticação
-        // Formato correto: http://admin:senha@host:6980/content/path
-        wowzaUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980${requestPath}`;
+        // Para arquivos de vídeo diretos - usar porta 6980 com autenticação
+        const cleanPath = requestPath.replace('/content/', '');
+        const pathParts = cleanPath.split('/');
+        
+        if (pathParts.length >= 3) {
+          const userLogin = pathParts[0];
+          const folderName = pathParts[1];
+          const fileName = pathParts[2];
+          
+          // Verificar se é MP4 ou precisa de conversão
+          const fileExtension = path.extname(fileName).toLowerCase();
+          const needsConversion = !['.mp4'].includes(fileExtension);
+          
+          // Nome do arquivo final (MP4)
+          const finalFileName = needsConversion ? 
+            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+          
+          wowzaUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${userLogin}/${folderName}/${finalFileName}`;
+        } else {
+          wowzaUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980${requestPath}`;
+        }
       }
       
       console.log(`🔗 Redirecionando para: ${wowzaUrl}`);
@@ -188,13 +226,13 @@
         });
         
         if (!wowzaResponse.ok) {
-          console.log(`❌ Erro ao acessar vídeo (${wowzaResponse.status}): ${wowzaHost}:6980/content${requestPath}`);
+          console.log(`❌ Erro ao acessar vídeo (${wowzaResponse.status}): ${wowzaUrl}`);
           
           // Se for erro 401/403, tentar URL alternativa sem autenticação na URL
           if (wowzaResponse.status === 401 || wowzaResponse.status === 403) {
             console.log('🔄 Tentando URL alternativa sem autenticação na URL...');
             
-            const alternativeUrl = `http://${wowzaHost}:6980${requestPath}`;
+            const alternativeUrl = wowzaUrl.replace(/http:\/\/[^@]+@/, 'http://');
             const alternativeResponse = await fetch(alternativeUrl, {
               method: req.method,
               headers: requestHeaders,
@@ -221,12 +259,12 @@
             error: 'Vídeo não encontrado',
             details: 'O arquivo não foi encontrado no servidor de streaming',
             requestPath: requestPath,
-            wowzaUrl: `${wowzaHost}:6980/content${requestPath}`,
+            wowzaUrl: wowzaUrl,
             status: wowzaResponse.status
           });
         }
         
-        console.log(`✅ Servindo vídeo via Wowza: ${wowzaHost}:6980/content${requestPath}`);
+        console.log(`✅ Servindo vídeo via Wowza: ${wowzaUrl}`);
         
         // Copiar headers da resposta do Wowza
         wowzaResponse.headers.forEach((value, key) => {

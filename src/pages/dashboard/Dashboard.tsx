@@ -173,10 +173,31 @@ const Dashboard: React.FC = () => {
       const processedVideos = data.map((item: any) => {
         const video = item.videos;
         
-        // Otimizar URL do vídeo
+        // Construir URL HLS correta
         let videoUrl = video.url;
-        if (videoUrl && videoUrl.includes('/api/videos-ssh/')) {
-          videoUrl = buildOptimizedSSHUrl(videoUrl);
+        
+        if (videoUrl && !videoUrl.startsWith('http')) {
+          const cleanPath = videoUrl.replace(/^\/+/, '');
+          const pathParts = cleanPath.split('/');
+          
+          if (pathParts.length >= 3) {
+            const userLogin = pathParts[0];
+            const folderName = pathParts[1];
+            const fileName = pathParts[2];
+            
+            // Verificar se é MP4 ou precisa de conversão
+            const fileExtension = fileName.split('.').pop()?.toLowerCase();
+            const needsConversion = !['mp4'].includes(fileExtension || '');
+            
+            // Nome do arquivo final (MP4)
+            const finalFileName = needsConversion ? 
+              fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+            
+            // Construir URL HLS correta
+            const isProduction = window.location.hostname !== 'localhost';
+            const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+            videoUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
+          }
         }
         
         return {

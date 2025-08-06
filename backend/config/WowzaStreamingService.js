@@ -329,8 +329,16 @@ class WowzaStreamingService {
 
     // Construir URL correta para vídeos VOD
     buildVideoUrl(userLogin, folderName, fileName) {
+        // Verificar se precisa converter para MP4
+        const fileExtension = path.extname(fileName).toLowerCase();
+        const needsConversion = !['.mp4'].includes(fileExtension);
+        
+        // Nome do arquivo final (MP4)
+        const finalFileName = needsConversion ? 
+            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+        
         // Construir caminho correto para o Wowza
-        const streamPath = `${userLogin}/${folderName}/${fileName}`;
+        const streamPath = `${userLogin}/${folderName}/${finalFileName}`;
         
         // Para VOD, usar URLs diretas com autenticação
         const isProduction = process.env.NODE_ENV === 'production';
@@ -339,7 +347,7 @@ class WowzaStreamingService {
         const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
         
         return {
-            hlsUrl: `http://${wowzaHost}:1935/vod/${streamPath}/playlist.m3u8`,
+            hlsUrl: `http://${wowzaHost}:1935/vod/_definst_/mp4:${streamPath}/playlist.m3u8`,
             rtmpUrl: `rtmp://${wowzaHost}:1935/vod/${streamPath}`,
             directUrl: `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${streamPath}`,
             proxyUrl: `/content/${streamPath}`

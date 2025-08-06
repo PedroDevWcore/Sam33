@@ -63,7 +63,14 @@ router.post('/', authMiddleware, async (req, res) => {
       const wowzaService = new WowzaStreamingService();
       await wowzaService.initializeFromDatabase(userId);
       
-      const videoUrls = wowzaService.buildVideoUrl(userLogin, folderName, fileName);
+      // Construir URLs corretas
+      const isProduction = process.env.NODE_ENV === 'production';
+      const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+      
+      // Para downloads do YouTube, sempre salvar como MP4
+      const mp4FileName = fileName.replace(/\.[^/.]+$/, '.mp4');
+      const hlsUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${mp4FileName}/playlist.m3u8`;
+      const directUrl = `http://${wowzaHost}:6980/content/${userLogin}/${folderName}/${mp4FileName}`;
       
       // Salvar no banco de dados com URL correta
       const [result] = await db.execute(
@@ -71,7 +78,7 @@ router.post('/', authMiddleware, async (req, res) => {
           codigo_playlist, path_video, video, width, height,
           bitrate, duracao, duracao_segundos, tipo, ordem, tamanho_arquivo
         ) VALUES (0, ?, ?, 1920, 1080, 2500, '00:03:30', 210, 'video', 0, ?)`,
-        [videoUrls.hlsUrl, videoTitle, 1024 * 1024]
+        [hlsUrl, videoTitle, 1024 * 1024]
       );
 
       res.json({
@@ -80,8 +87,8 @@ router.post('/', authMiddleware, async (req, res) => {
         video: {
           id: result.insertId,
           nome: videoTitle,
-          url: videoUrls.hlsUrl,
-          directUrl: videoUrls.directUrl,
+          url: hlsUrl,
+          directUrl: directUrl,
           duracao: 210,
           tamanho: 1024 * 1024 // 1MB placeholder
         }
