@@ -78,6 +78,29 @@ function formatarDuracao(segundos: number): string {
   }
 }
 
+// Função para atualizar estatísticas da playlist
+async function updatePlaylistStats(playlistId) {
+  try {
+    const [stats] = await db.execute(
+      `SELECT 
+        COUNT(*) as total_videos,
+        SUM(COALESCE(duracao, 0)) as duracao_total
+       FROM videos 
+       WHERE playlist_id = ?`,
+      [playlistId]
+    );
+
+    if (stats.length > 0) {
+      await db.execute(
+        'UPDATE playlists SET total_videos = ?, duracao_total = ? WHERE id = ?',
+        [stats[0].total_videos, stats[0].duracao_total || 0, playlistId]
+      );
+      console.log(`📊 Estatísticas da playlist ${playlistId} atualizadas: ${stats[0].total_videos} vídeos`);
+    }
+  } catch (error) {
+    console.error('Erro ao atualizar estatísticas da playlist:', error);
+  }
+}
 function formatarTamanho(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB'];
   let size = bytes;
