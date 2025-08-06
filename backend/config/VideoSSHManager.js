@@ -115,7 +115,7 @@ class VideoSSHManager {
                 const relativeMp4Path = mp4Path.replace('/usr/local/WowzaStreamingEngine/content/', '');
                 
                 // URL HLS correta com formato Wowza: /vod/_definst_/mp4:caminho/playlist.m3u8
-                const hlsUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${relativeMp4Path}/playlist.m3u8`;
+                const hlsUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${relativeMp4Path.replace(/^\/+/, '')}/playlist.m3u8`;
                 
                 videos.push({
                     id: Buffer.from(fullPath).toString('base64'), // ID único baseado no caminho

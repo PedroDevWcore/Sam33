@@ -7,7 +7,7 @@ import {
   Settings, Users, BarChart, FileVideo,
   PlayCircle, Play, Smartphone, RefreshCw, Radio, Square,
   FolderPlus, Calendar, Youtube, Wifi, ArrowLeftRight, 
-  Megaphone, Activity, Clock, Eye, Zap, Server, AlertCircle
+  Megaphone, Activity, Clock, Eye, Zap, Server, AlertCircle, HardDrive
 } from 'lucide-react';
 
 interface OBSStreamStatus {
@@ -82,6 +82,64 @@ const Dashboard: React.FC = () => {
       window.open(externalUrl, '_blank');
     }
   };
+  // Estado para dados de armazenamento
+  const [storageData, setStorageData] = useState({
+    used: 0,
+    total: user?.espaco || 0,
+    percentage: 0
+  });
+
+  // Carregar dados de armazenamento
+  useEffect(() => {
+    loadStorageData();
+  }, [user]);
+
+  const loadStorageData = async () => {
+    try {
+      const token = await getToken();
+      if (!token || !user) return;
+
+      // Buscar dados de todas as pastas do usuário para calcular espaço usado
+      const foldersResponse = await fetch('/api/folders', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      
+      if (foldersResponse.ok) {
+        const folders = await foldersResponse.json();
+        let totalUsed = 0;
+        
+        // Para cada pasta, buscar o uso via API SSH
+        for (const folder of folders) {
+          try {
+            const usageResponse = await fetch(`/api/videos-ssh/folders/${folder.id}/usage`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            
+            if (usageResponse.ok) {
+              const usageData = await usageResponse.json();
+              if (usageData.success) {
+                totalUsed += usageData.usage.used || 0;
+              }
+            }
+          } catch (error) {
+            console.warn(`Erro ao carregar uso da pasta ${folder.id}:`, error);
+          }
+        }
+        
+        const total = user.espaco || 0;
+        const percentage = total > 0 ? Math.round((totalUsed / total) * 100) : 0;
+        
+        setStorageData({
+          used: totalUsed,
+          total: total,
+          percentage: percentage
+        });
+      }
+    } catch (error) {
+      console.error('Erro ao carregar dados de armazenamento:', error);
+    }
+  };
+
   useEffect(() => {
     loadPlaylists();
     checkOBSStatus();
@@ -472,34 +530,127 @@ const Dashboard: React.FC = () => {
           </div>
           <hr className="mb-4 border-gray-200" />
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-            <div>
-              <h3 className="text-lg font-semibold text-gray-800">{user?.nome || 'Usuário'}</h3>
-              <p className="text-gray-600">login</p>
-
-              <div className="mt-4">
-                <h3 className="text-lg font-semibold text-gray-800">Sistema</h3>
-                <p className="text-gray-600">Streaming Manager</p>
+          <div className="space-y-6">
+            {/* Informações do Usuário */}
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-4 rounded-lg border border-blue-200">
+              <div className="flex items-center space-x-3 mb-3">
+                <div className="h-12 w-12 bg-primary-600 rounded-full flex items-center justify-center text-white font-bold text-lg">
+                  {user?.nome?.charAt(0).toUpperCase() || 'U'}
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">{user?.nome || 'Usuário'}</h3>
+                  <p className="text-sm text-gray-600">{user?.email?.split('@')[0] || 'login'}</p>
+                  <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                    user?.tipo === 'revenda' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'
+                  }`}>
+                    {user?.tipo === 'revenda' ? 'Revenda' : 'Streaming'}
+                  </span>
+                </div>
               </div>
             </div>
 
-            <div>
-              <h3 className="text-lg font-semibold text-gray-800">{streamData.viewers}</h3>
-              <p className="text-gray-600">espectadores ativos</p>
+            {/* Dados do Plano */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Bitrate */}
+              <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-4 rounded-lg border border-purple-200">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center">
+                    <Zap className="h-5 w-5 text-purple-600 mr-2" />
+                    <span className="text-sm font-medium text-purple-800">Bitrate do Plano</span>
+                  </div>
+                </div>
+                <div className="flex items-baseline space-x-2">
+                  <span className="text-2xl font-bold text-purple-900">{user?.bitrate || 0}</span>
+                  <span className="text-sm text-purple-600">kbps</span>
+                </div>
+                <div className="mt-2 text-xs text-purple-600">
+                  Atual: {activeBitrate} kbps
+                </div>
+              </div>
 
-              <div className="mt-4">
-                <h3 className="text-lg font-semibold text-gray-800">{streamData.bitrate} kbps</h3>
-                <p className="text-gray-600">bitrate atual</p>
+              {/* Espectadores */}
+              <div className="bg-gradient-to-br from-green-50 to-green-100 p-4 rounded-lg border border-green-200">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center">
+                    <Users className="h-5 w-5 text-green-600 mr-2" />
+                    <span className="text-sm font-medium text-green-800">Espectadores Máx.</span>
+                  </div>
+                </div>
+                <div className="flex items-baseline space-x-2">
+                  <span className="text-2xl font-bold text-green-900">{user?.espectadores || 0}</span>
+                  <span className="text-sm text-green-600">máx</span>
+                </div>
+                <div className="mt-2 text-xs text-green-600">
+                  Atual: {totalViewers} online
+                </div>
               </div>
             </div>
 
-            <div>
-              <h3 className="text-lg font-semibold text-gray-800">{user?.espaco || 0} GB</h3>
-              <p className="text-gray-600">espaço disponível</p>
+            {/* Armazenamento */}
+            <div className="bg-gradient-to-br from-orange-50 to-orange-100 p-4 rounded-lg border border-orange-200">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center">
+                  <HardDrive className="h-5 w-5 text-orange-600 mr-2" />
+                  <span className="text-sm font-medium text-orange-800">Armazenamento</span>
+                </div>
+                <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                  storageData.percentage > 90 ? 'bg-red-100 text-red-800' :
+                  storageData.percentage > 70 ? 'bg-yellow-100 text-yellow-800' :
+                  'bg-green-100 text-green-800'
+                }`}>
+                  {storageData.percentage}% usado
+                </span>
+              </div>
+              
+              <div className="space-y-2">
+                <div className="flex justify-between items-baseline">
+                  <span className="text-sm text-orange-700">Usado:</span>
+                  <span className="font-semibold text-orange-900">{storageData.used} MB</span>
+                </div>
+                <div className="flex justify-between items-baseline">
+                  <span className="text-sm text-orange-700">Total do plano:</span>
+                  <span className="font-semibold text-orange-900">{storageData.total} MB</span>
+                </div>
+                <div className="w-full bg-orange-200 rounded-full h-2">
+                  <div
+                    className={`h-2 rounded-full transition-all duration-300 ${
+                      storageData.percentage > 90 ? 'bg-red-600' :
+                      storageData.percentage > 70 ? 'bg-yellow-600' :
+                      'bg-orange-600'
+                    }`}
+                    style={{ width: `${Math.min(100, storageData.percentage)}%` }}
+                  ></div>
+                </div>
+                <div className="flex justify-between items-baseline">
+                  <span className="text-sm text-orange-700">Disponível:</span>
+                  <span className={`font-semibold ${
+                    storageData.total - storageData.used > 100 ? 'text-green-700' : 'text-red-700'
+                  }`}>
+                    {storageData.total - storageData.used} MB
+                  </span>
+                </div>
+              </div>
+              
+              {storageData.percentage > 90 && (
+                <div className="mt-3 p-2 bg-red-50 border border-red-200 rounded-md">
+                  <p className="text-xs text-red-800">
+                    ⚠️ Espaço quase esgotado! Remova vídeos antigos ou entre em contato para aumentar seu plano.
+                  </p>
+                </div>
+              )}
+            </div>
 
-              <div className="mt-4">
-                <h3 className="text-lg font-semibold text-gray-800">{streamData.uptime}</h3>
-                <p className="text-gray-600">tempo online</p>
+            {/* Tempo Online */}
+            <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-4 rounded-lg border border-blue-200">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <Clock className="h-5 w-5 text-blue-600 mr-2" />
+                  <span className="text-sm font-medium text-blue-800">Tempo Online</span>
+                </div>
+                <span className="text-lg font-bold text-blue-900">{activeUptime}</span>
+              </div>
+              <div className="mt-2 text-xs text-blue-600">
+                {hasActiveTransmission ? 'Transmitindo agora' : 'Última transmissão'}
               </div>
             </div>
           </div>

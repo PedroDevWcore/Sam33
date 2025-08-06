@@ -84,11 +84,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ playlistVideo, onVideoEnd }) 
             fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
           
           // Construir URL HLS correta com formato Wowza
-          const relativePath = remotePath.replace('/usr/local/WowzaStreamingEngine/content', '');
-          const finalRelativePath = needsConversion ? 
-            relativePath.replace(/\.[^/.]+$/, '.mp4') : relativePath;
-          
-          return `http://${wowzaHost}:1935/vod/_definst_/mp4:${finalRelativePath.replace(/^\/+/, '')}/playlist.m3u8`;
+          return `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
         } catch (error) {
           console.warn('Erro ao decodificar videoId, usando URL original:', error);
           return url;
