@@ -5,6 +5,7 @@ const VideoSSHManager = require('../config/VideoSSHManager');
 const SSHManager = require('../config/SSHManager');
 const fs = require('fs').promises;
 const path = require('path');
+const WowzaStreamingService = require('../config/WowzaStreamingService');
 
 const router = express.Router();
 
@@ -192,6 +193,9 @@ router.get('/list', authMiddleware, async (req, res) => {
 
     // Listar vídeos via SSH
     const videos = await VideoSSHManager.listVideosFromServer(serverId, userLogin, folderName);
+
+    // Sincronizar vídeos com a tabela videos
+    await syncVideosToDatabase(videos, userLogin, folderName, userId);
 
     res.json({
       success: true,
@@ -744,6 +748,12 @@ router.post('/folders/:folderId/sync', authMiddleware, async (req, res) => {
     const serverId = folder.codigo_servidor || 1;
     const folderName = folder.identificacao;
 
+    // Listar vídeos do servidor
+    const sshVideos = await VideoSSHManager.listVideosFromServer(serverId, userLogin, folderName);
+    
+    // Sincronizar com a tabela videos
+    await syncVideosToDatabase(sshVideos, userLogin, folderName, userId);
+    
     // Limpar arquivos órfãos
     const cleanupResult = await VideoSSHManager.cleanupOrphanedFiles(serverId, userLogin);
     
@@ -753,7 +763,8 @@ router.post('/folders/:folderId/sync', authMiddleware, async (req, res) => {
 
     res.json({
       success: true,
-      message: `Pasta ${folderName} sincronizada com sucesso`,
+      message: `Pasta ${folderName} sincronizada com sucesso. ${sshVideos.length} vídeo(s) processado(s).`,
+      videos_synced: sshVideos.length,
       cleanup: cleanupResult
     });
   } catch (error) {
@@ -765,5 +776,80 @@ router.post('/folders/:folderId/sync', authMiddleware, async (req, res) => {
     });
   }
 });
+
+// Função para sincronizar vídeos SSH com a tabela videos
+async function syncVideosToDatabase(sshVideos, userLogin, folderName, userId) {
+  try {
+    console.log(`🔄 Sincronizando ${sshVideos.length} vídeos SSH com o banco de dados...`);
+    
+    for (const video of sshVideos) {
+      try {
+        // Verificar se o vídeo já existe na tabela videos
+        const [existingRows] = await db.execute(
+          'SELECT id FROM videos WHERE nome = ? AND url LIKE ?',
+          [video.nome, `%${userLogin}/${folderName}%`]
+        );
+
+        if (existingRows.length === 0) {
+          // Construir URL correta para o banco
+          const videoUrl = `/content/${userLogin}/${folderName}/${video.nome}`;
+          
+          // Buscar ou criar playlist padrão para vídeos SSH
+          let playlistId = await getOrCreateSSHPlaylist(userId, folderName);
+          
+          // Inserir vídeo na tabela videos
+          await db.execute(
+            `INSERT INTO videos (nome, descricao, url, duracao, playlist_id, created_at, updated_at) 
+             VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
+            [
+              video.nome,
+              `Vídeo sincronizado via SSH da pasta ${folderName}`,
+              videoUrl,
+              video.duration || 0,
+              playlistId
+            ]
+          );
+          
+          console.log(`✅ Vídeo ${video.nome} sincronizado com o banco`);
+        }
+      } catch (videoError) {
+        console.error(`Erro ao sincronizar vídeo ${video.nome}:`, videoError);
+      }
+    }
+    
+    console.log(`✅ Sincronização concluída para pasta ${folderName}`);
+  } catch (error) {
+    console.error('Erro na sincronização com banco:', error);
+  }
+}
+
+// Função para obter ou criar playlist padrão para vídeos SSH
+async function getOrCreateSSHPlaylist(userId, folderName) {
+  try {
+    const playlistName = `SSH - ${folderName}`;
+    
+    // Verificar se playlist já existe
+    const [existingPlaylist] = await db.execute(
+      'SELECT id FROM playlists WHERE nome = ? AND codigo_stm = ?',
+      [playlistName, userId]
+    );
+
+    if (existingPlaylist.length > 0) {
+      return existingPlaylist[0].id;
+    }
+
+    // Criar nova playlist
+    const [result] = await db.execute(
+      'INSERT INTO playlists (nome, codigo_stm, data_criacao) VALUES (?, ?, NOW())',
+      [playlistName, userId]
+    );
+
+    console.log(`📁 Playlist SSH criada: ${playlistName} (ID: ${result.insertId})`);
+    return result.insertId;
+  } catch (error) {
+    console.error('Erro ao criar playlist SSH:', error);
+    return 1; // Fallback para playlist padrão
+  }
+}
 
 module.exports = router;

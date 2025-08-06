@@ -866,18 +866,16 @@ export default function GerenciarVideos() {
     }
     
     const videosParaPlaylist = sshVideos.map(v => {      
-      // Construir URL direta do Wowza para playlist (melhor performance)
+      // Para playlist, usar URL direta do Wowza (porta 6980) para arquivos MP4
       let videoUrl;
       try {
-        const remotePath = Buffer.from(v.id, 'base64').toString('utf-8');
         const isProduction = window.location.hostname !== 'localhost';
         const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
         const wowzaUser = 'admin';
         const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
         
-        // URL direta do Wowza para reprodução fluida
-        const relativePath = remotePath.replace('/usr/local/WowzaStreamingEngine/content', '');
-        videoUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content${relativePath}`;
+        // Construir URL direta para o arquivo
+        videoUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${v.userLogin}/${v.folder}/${v.nome}`;
       } catch (error) {
         console.warn('Erro ao construir URL direta, usando proxy:', error);
         videoUrl = `/content/${v.userLogin}/${v.folder}/${v.nome}`;
@@ -906,22 +904,20 @@ export default function GerenciarVideos() {
       return;
     }
     
-    // Para nova aba, usar URL direta do Wowza para melhor performance
+    // Para nova aba, sempre usar URL direta do Wowza (porta 6980)
     try {
-      const remotePath = Buffer.from(video.id, 'base64').toString('utf-8');
       const isProduction = window.location.hostname !== 'localhost';
       const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
       const wowzaUser = 'admin';
       const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
       
-      // URL direta do Wowza para melhor performance em nova aba
-      const relativePath = remotePath.replace('/usr/local/WowzaStreamingEngine/content', '');
-      const streamUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content${relativePath}`;
+      // URL direta do arquivo no Wowza
+      const streamUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${video.userLogin}/${video.folder}/${video.nome}`;
       
       window.open(streamUrl, '_blank');
     } catch (error) {
       console.warn('Erro ao construir URL direta, usando fallback:', error);
-      const streamUrl = buildOptimizedSSHUrl(video.id);
+      const streamUrl = `/content/${video.userLogin}/${video.folder}/${video.nome}`;
       window.open(streamUrl, '_blank');
     }
   };

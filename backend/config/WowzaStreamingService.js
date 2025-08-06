@@ -332,16 +332,19 @@ class WowzaStreamingService {
         // Construir caminho correto para o Wowza
         const streamPath = `${userLogin}/${folderName}/${fileName}`;
         
-        // Para VOD, usar URLs diretas com autenticação
+        // Para VOD, usar URLs corretas baseadas no tipo de acesso
         const isProduction = process.env.NODE_ENV === 'production';
         const wowzaHost = isProduction ? 'samhost.wcore.com.br' : this.wowzaHost;
         const wowzaUser = 'admin';
         const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
         
         return {
+            // Para arquivos MP4, usar URL direta do Wowza (porta 6980)
+            directUrl: `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${streamPath}`,
+            // Para HLS, só funciona se o Wowza estiver configurado para gerar HLS automaticamente
             hlsUrl: `http://${wowzaHost}:1935/vod/${streamPath}/playlist.m3u8`,
             rtmpUrl: `rtmp://${wowzaHost}:1935/vod/${streamPath}`,
-            directUrl: `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${streamPath}`,
+            // URL via proxy do backend (mais confiável)
             proxyUrl: `/content/${streamPath}`
         };
     }

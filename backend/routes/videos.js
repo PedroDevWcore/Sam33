@@ -79,7 +79,22 @@ router.get('/', authMiddleware, async (req, res) => {
     const userLogin = req.user.email.split('@')[0];
     const folderPath = `/${userLogin}/${folderName}/`;
 
-    const [rows] = await db.execute(
+    // Buscar vídeos da nova tabela videos primeiro
+    const [videosRows] = await db.execute(
+      `SELECT 
+        id,
+        nome,
+        url,
+        duracao,
+        created_at
+       FROM videos 
+       WHERE url LIKE ?
+       ORDER BY id`,
+      [`%${userLogin}/${folderName}%`]
+    );
+
+    // Se não encontrou na tabela videos, buscar na tabela antiga (playlists_videos)
+    const [legacyRows] = await db.execute(
       `SELECT 
         codigo as id,
         video as nome,
@@ -93,13 +108,33 @@ router.get('/', authMiddleware, async (req, res) => {
     );
 
     console.log(`📁 Buscando vídeos na pasta: ${folderPath}`);
-    console.log(`📊 Encontrados ${rows.length} vídeos no banco`);
+    console.log(`📊 Encontrados ${videosRows.length} vídeos na tabela videos e ${legacyRows.length} na tabela legacy`);
 
-    const videos = rows.map(video => {
+    // Combinar resultados das duas tabelas
+    const allVideos = [
+      ...videosRows.map(video => ({
+        id: video.id,
+        nome: video.nome,
+        url: video.url,
+        duracao: video.duracao,
+        tamanho: 0, // Não temos tamanho na nova tabela
+        source: 'videos'
+      })),
+      ...legacyRows.map(video => ({
+        id: video.id,
+        nome: video.nome,
+        url: video.url,
+        duracao: video.duracao,
+        tamanho: video.tamanho,
+        source: 'playlists_videos'
+      }))
+    ];
+
+    const videos = allVideos.map(video => {
       // Garantir que a URL está no formato correto para o proxy
       const cleanPath = video.url.replace(/^\/+/, ''); // Remove barras iniciais
       const url = cleanPath;
-      console.log(`🎥 Vídeo: ${video.nome} -> URL: /content/${url}`);
+      console.log(`🎥 Vídeo: ${video.nome} -> URL: /content/${url} (fonte: ${video.source})`);
       
       return {
         id: video.id,
@@ -109,7 +144,8 @@ router.get('/', authMiddleware, async (req, res) => {
         tamanho: video.tamanho,
         originalPath: video.url,
         folder: folderName,
-        user: userLogin
+        user: userLogin,
+        source: video.source
       };
     });
 
@@ -207,7 +243,18 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     // Nome do vídeo para salvar no banco
     const videoTitle = req.file.originalname;
 
+    // Buscar ou criar playlist padrão para a pasta
+    let playlistId = await getOrCreateFolderPlaylist(userId, folderName);
+    
+    // Salvar na nova tabela videos
     const [result] = await db.execute(
+      `INSERT INTO videos (nome, descricao, url, duracao, playlist_id, created_at, updated_at) 
+       VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
+      [videoTitle, `Vídeo enviado para a pasta ${folderName}`, relativePath, duracao, playlistId]
+    );
+    
+    // Também salvar na tabela legacy para compatibilidade
+    await db.execute(
       `INSERT INTO playlists_videos (
         codigo_playlist, path_video, video, width, height, 
         bitrate, duracao, duracao_segundos, tipo, ordem, tamanho_arquivo
@@ -237,6 +284,35 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     res.status(500).json({ error: 'Erro no upload do vídeo', details: err.message });
   }
 });
+
+// Função para obter ou criar playlist padrão para uma pasta
+async function getOrCreateFolderPlaylist(userId, folderName) {
+  try {
+    const playlistName = `Pasta - ${folderName}`;
+    
+    // Verificar se playlist já existe
+    const [existingPlaylist] = await db.execute(
+      'SELECT id FROM playlists WHERE nome = ? AND codigo_stm = ?',
+      [playlistName, userId]
+    );
+
+    if (existingPlaylist.length > 0) {
+      return existingPlaylist[0].id;
+    }
+
+    // Criar nova playlist
+    const [result] = await db.execute(
+      'INSERT INTO playlists (nome, codigo_stm, data_criacao) VALUES (?, ?, NOW())',
+      [playlistName, userId]
+    );
+
+    console.log(`📁 Playlist criada para pasta: ${playlistName} (ID: ${result.insertId})`);
+    return result.insertId;
+  } catch (error) {
+    console.error('Erro ao criar playlist para pasta:', error);
+    return 1; // Fallback para playlist padrão
+  }
+}
 
 // Função auxiliar para formatar duração
 function formatDuration(seconds) {

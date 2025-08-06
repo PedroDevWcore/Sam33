@@ -95,8 +95,23 @@ const UniversalVideoPlayer: React.FC<UniversalVideoPlayerProps> = ({
       return src;
     }
 
-    // Para arquivos locais, sempre usar o proxy /content do backend
+    // Para arquivos locais, usar URL direta do Wowza para melhor compatibilidade
     const cleanPath = src.replace(/^\/+/, ''); // Remove barras iniciais
+    
+    // Verificar se é um arquivo de vídeo direto (não HLS)
+    const isDirectVideo = /\.(mp4|avi|mov|wmv|flv|webm|mkv)$/i.test(cleanPath);
+    
+    if (isDirectVideo) {
+      // Para vídeos diretos, usar URL do Wowza porta 6980
+      const isProduction = window.location.hostname !== 'localhost';
+      const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+      const wowzaUser = 'admin';
+      const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
+      
+      return `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${cleanPath}`;
+    }
+    
+    // Para outros tipos, usar proxy do backend
     return `/content/${cleanPath}`;
   };
 
@@ -117,6 +132,11 @@ const UniversalVideoPlayer: React.FC<UniversalVideoPlayerProps> = ({
   const getFileType = (url: string) => {
     // Para URLs SSH, sempre tratar como vídeo regular
     if (url.includes('/api/videos-ssh/')) {
+      return 'video';
+    }
+    
+    // Para URLs diretas do Wowza com autenticação, tratar como vídeo
+    if (url.includes('@') && url.includes(':6980/content/')) {
       return 'video';
     }
     
