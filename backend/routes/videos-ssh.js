@@ -1,855 +1,1361 @@
-const express = require('express');
-const db = require('../config/database');
-const authMiddleware = require('../middlewares/authMiddleware');
-const VideoSSHManager = require('../config/VideoSSHManager');
-const SSHManager = require('../config/SSHManager');
-const fs = require('fs').promises;
-const path = require('path');
-const WowzaStreamingService = require('../config/WowzaStreamingService');
+import { useEffect, useState } from "react";
+import { useAuth } from "../../context/AuthContext";
+import { toast } from "react-toastify";
+import { Play, Trash2, RefreshCw, HardDrive, Download, Eye, Edit2, Save } from "lucide-react";
+import UniversalVideoPlayer from "../../components/UniversalVideoPlayer";
+import { Maximize, Minimize, X, Activity } from "lucide-react";
 
-const router = express.Router();
+type Folder = {
+  id: number;
+  nome: string;
+};
 
-// GET /api/videos-ssh/proxy-stream/:videoId - Stream direto via proxy (otimizado)
-router.get('/proxy-stream/:videoId', async (req, res) => {
-  try {
-    const videoId = req.params.videoId;
-    
-    // Verificar autenticação
-    let token = null;
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7);
-    }
-    if (!token && req.query.token) {
-      token = req.query.token;
-    }
-    
-    if (!token) {
-      return res.status(401).json({ error: 'Token de acesso requerido' });
-    }
+type Video = {
+  id: number;
+  nome: string;
+  path?: string;
+  fullPath?: string;
+  folder?: string;
+  duracao?: number;
+  tamanho?: number;
+  url?: string;
+  serverId?: number;
+  userLogin?: string;
+  lastModified?: string;
+  permissions?: string;
+};
 
-    // Verificar e decodificar token
-    const jwt = require('jsonwebtoken');
-    const JWT_SECRET = process.env.JWT_SECRET || 'sua_chave_secreta_super_segura_aqui';
-    
-    let decoded;
-    try {
-      decoded = jwt.verify(token, JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ error: 'Token inválido' });
-    }
+type SSHVideo = {
+  id: string;
+  nome: string;
+  path: string;
+  fullPath: string;
+  folder: string;
+  size: number;
+  duration: number;
+  permissions: string;
+  lastModified: string;
+  serverId: number;
+  userLogin: string;
+};
 
-    // Decodificar videoId
-    let remotePath;
-    try {
-      remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
-    } catch (decodeError) {
-      return res.status(400).json({ error: 'ID de vídeo inválido' });
-    }
+type EditingVideo = {
+  id: string;
+  nome: string;
+  originalNome: string;
+};
 
-    // Verificar se o caminho pertence ao usuário
-    const userLogin = decoded.email ? decoded.email.split('@')[0] : `user_${decoded.userId}`;
-    if (!remotePath.includes(`/${userLogin}/`)) {
-      return res.status(403).json({ error: 'Acesso negado ao vídeo' });
-    }
+type CacheStatus = {
+  totalFiles: number;
+  totalSize: number;
+  maxSize: number;
+  usagePercentage: number;
+  files: Array<{
+    name: string;
+    size: number;
+    lastAccessed: string;
+    age: number;
+  }>;
+};
 
-    // Buscar servidor do usuário
-    const [serverRows] = await db.execute(
-      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
-      [decoded.userId]
-    );
-    const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
+type FolderUsage = {
+  used: number;
+  total: number;
+  percentage: number;
+  available: number;
+  database_used: number;
+  real_used: number;
+};
 
-    // Configurar headers otimizados para streaming
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Range, Authorization');
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.setHeader('Connection', 'keep-alive');
-    
-    // Definir Content-Type
-    const extension = path.extname(remotePath).toLowerCase();
-    switch (extension) {
-      case '.mp4': res.setHeader('Content-Type', 'video/mp4'); break;
-      case '.avi': res.setHeader('Content-Type', 'video/x-msvideo'); break;
-      case '.mov': res.setHeader('Content-Type', 'video/quicktime'); break;
-      case '.wmv': res.setHeader('Content-Type', 'video/x-ms-wmv'); break;
-      case '.webm': res.setHeader('Content-Type', 'video/webm'); break;
-      case '.mkv': res.setHeader('Content-Type', 'video/x-matroska'); break;
-      default: res.setHeader('Content-Type', 'video/mp4');
-    }
-    
-
-    // Otimização: Para arquivos pequenos, usar cache. Para grandes, stream direto
-    const { conn } = await SSHManager.getConnection(serverId);
-    
-    // Obter tamanho do arquivo
-    const sizeCommand = `stat -c%s "${remotePath}" 2>/dev/null || echo "0"`;
-    const sizeResult = await SSHManager.executeCommand(serverId, sizeCommand);
-    const fileSize = parseInt(sizeResult.stdout.trim()) || 0;
-    
-    if (fileSize === 0) {
-      return res.status(404).json({ error: 'Arquivo não encontrado' });
-    }
-
-    // Para arquivos muito grandes (>500MB), usar streaming otimizado
-    const isLargeFile = fileSize > 500 * 1024 * 1024;
-    
-    // Suporte a Range requests
-    const range = req.headers.range;
-    if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunksize = (end - start) + 1;
-      
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-      res.setHeader('Content-Length', chunksize);
-      
-      // Stream otimizado com range
-      const command = isLargeFile ? 
-        `dd if="${remotePath}" bs=64k skip=${Math.floor(start/65536)} count=${Math.ceil(chunksize/65536)} 2>/dev/null | dd bs=1 skip=${start%65536} count=${chunksize} 2>/dev/null` :
-        `dd if="${remotePath}" bs=1 skip=${start} count=${chunksize} 2>/dev/null`;
-        
-      conn.exec(command, (err, stream) => {
-        if (err) {
-          return res.status(500).json({ error: 'Erro ao acessar arquivo' });
-        }
-        
-        // Configurar timeout para streams grandes
-        if (isLargeFile) {
-          stream.setTimeout(60000); // 60 segundos para arquivos grandes
-        }
-        
-        stream.pipe(res);
-        
-        stream.on('error', (streamErr) => {
-          console.error('Erro no stream:', streamErr);
-          if (!res.headersSent) {
-            res.status(500).json({ error: 'Erro durante streaming' });
-          }
-        });
-      });
-    } else {
-      // Stream completo
-      res.setHeader('Content-Length', fileSize);
-      
-      // Para arquivos grandes, usar comando otimizado
-      const command = isLargeFile ? `dd if="${remotePath}" bs=64k 2>/dev/null` : `cat "${remotePath}"`;
-      
-      conn.exec(command, (err, stream) => {
-        if (err) {
-          return res.status(500).json({ error: 'Erro ao acessar arquivo' });
-        }
-        
-        // Configurar timeout
-        if (isLargeFile) {
-          stream.setTimeout(120000); // 2 minutos para arquivos grandes
-        }
-        
-        stream.pipe(res);
-        
-        stream.on('error', (streamErr) => {
-          console.error('Erro no stream:', streamErr);
-          if (!res.headersSent) {
-            res.status(500).json({ error: 'Erro durante streaming' });
-          }
-        });
-      });
-    }
-
-  } catch (error) {
-    console.error('❌ Erro no proxy stream:', error);
-    return res.status(500).json({ 
-      error: 'Erro interno do servidor',
-      details: error.message 
-    });
+function formatarDuracao(segundos: number): string {
+  const h = Math.floor(segundos / 3600);
+  const m = Math.floor((segundos % 3600) / 60);
+  const s = Math.floor(segundos % 60);
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  } else {
+    return `${m}:${s.toString().padStart(2, "0")}`;
   }
-});
+}
 
-// GET /api/videos-ssh/list - Lista vídeos do servidor via SSH
-router.get('/list', authMiddleware, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
-    const folderName = req.query.folder;
-
-    if (!folderName) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Nome da pasta é obrigatório' 
-      });
-    }
-
-    // Buscar servidor do usuário
-    const [serverRows] = await db.execute(
-      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
-      [userId]
-    );
-
-    const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
-
-    // Listar vídeos via SSH
-    const videos = await VideoSSHManager.listVideosFromServer(serverId, userLogin, folderName);
-
-    // Sincronizar vídeos com a tabela videos
-    await syncVideosToDatabase(videos, userLogin, folderName, userId);
-
-    res.json({
-      success: true,
-      videos: videos,
-      folder: folderName,
-      server_id: serverId
-    });
-  } catch (error) {
-    console.error('Erro ao listar vídeos SSH:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erro ao listar vídeos do servidor',
-      details: error.message 
-    });
+function formatarTamanho(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = bytes;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex++;
   }
-});
+  return `${size.toFixed(2)} ${units[unitIndex]}`;
+}
 
-// GET /api/videos-ssh/stream/:videoId - Stream de vídeo via SSH
-router.get('/stream/:videoId', async (req, res) => {
-  try {
-    const videoId = req.params.videoId;
-    
-    // Verificar autenticação via token no query parameter ou header
-    let token = null;
-    
-    // Verificar token no header Authorization
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7);
-    }
-    
-    // Verificar token no query parameter (para nova aba)
-    if (!token && req.query.token) {
-      token = req.query.token;
-    }
-    
-    if (!token) {
-      console.log('❌ Token de acesso não fornecido para vídeo SSH:', {
-        path: req.path,
-        method: req.method,
-        headers: Object.keys(req.headers),
-        query: Object.keys(req.query)
-      });
-      return res.status(401).json({ error: 'Token de acesso requerido' });
-    }
+function ModalVideo({
+  aberto,
+  onFechar,
+  videoAtual,
+  playlist,
+}: {
+  aberto: boolean;
+  onFechar: () => void;
+  videoAtual?: Video | null;
+  playlist?: Video[];
+}) {
+  const [indexAtual, setIndexAtual] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
-    // Verificar e decodificar token
-    const jwt = require('jsonwebtoken');
-    const JWT_SECRET = process.env.JWT_SECRET || 'sua_chave_secreta_super_segura_aqui';
-    
-    let decoded;
-    try {
-      decoded = jwt.verify(token, JWT_SECRET);
-    } catch (jwtError) {
-      console.error('Erro de autenticação no vídeo SSH:', jwtError.message);
-      return res.status(401).json({ error: 'Token inválido' });
+  useEffect(() => {
+    if (playlist && playlist.length > 0) setIndexAtual(0);
+  }, [playlist]);
+
+  useEffect(() => {
+    setIndexAtual(0);
+  }, [videoAtual]);
+
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onFechar();
+      }
+    };
+
+    if (aberto) {
+      document.addEventListener('keydown', handleEscape);
+      document.body.style.overflow = 'hidden';
     }
 
-    // Buscar dados do usuário
-    let userRows = [];
-    if (decoded.tipo === 'revenda') {
-      [userRows] = await db.execute(
-        'SELECT codigo, nome, email FROM revendas WHERE codigo = ? AND status = 1',
-        [decoded.userId]
-      );
+    return () => {
+      document.removeEventListener('keydown', handleEscape);
+      document.body.style.overflow = 'unset';
+    };
+  }, [aberto, onFechar]);
+
+  if (!aberto) return null;
+
+  const videos = playlist && playlist.length > 0 ? playlist : videoAtual ? [videoAtual] : [];
+  const video = videos[indexAtual];
+
+  const proximoVideo = () => {
+    if (indexAtual < videos.length - 1) {
+      setIndexAtual(indexAtual + 1);
     } else {
-      [userRows] = await db.execute(
-        'SELECT codigo, identificacao as nome, email FROM streamings WHERE codigo = ? AND status = 1',
-        [decoded.userId]
-      );
+      setIndexAtual(0);
     }
+  };
 
-    if (userRows.length === 0) {
-      return res.status(401).json({ error: 'Usuário não encontrado' });
+  const goToPreviousVideo = () => {
+    if (indexAtual > 0) {
+      setIndexAtual(indexAtual - 1);
     }
+  };
 
-    const user = userRows[0];
-    const userLogin = user.email ? user.email.split('@')[0] : `user_${user.codigo}`;
+  const goToNextVideo = () => {
+    if (indexAtual < videos.length - 1) {
+      setIndexAtual(indexAtual + 1);
+    }
+  };
 
-    // Decodificar videoId (base64)
-    let remotePath;
+  const buildVideoUrl = (url: string) => {
+    if (!url) return '';
+    if (url.startsWith('http')) return url;
+    if (url.includes('/api/videos-ssh/')) return url;
+    const cleanPath = url.replace(/^\/+/, '');
+    return `/content/${cleanPath}`;
+  };
+
+  const closePreview = () => {
+    setIndexAtual(0);
+    onFechar();
+  };
+
+  const toggleFullscreen = () => {
+    setIsFullscreen(prev => !prev);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-95 flex justify-center items-center z-50 p-2 sm:p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          closePreview();
+        }
+      }}
+    >
+      <div className={`bg-black rounded-lg relative ${
+        isFullscreen ? 'w-screen h-screen' : 'max-w-[75vw] max-h-[70vh] w-full min-h-[400px]'
+        }`}>
+        
+
+        {/* Controles do Modal */}
+        <div className="absolute top-2 right-2 z-30 flex items-center space-x-1">
+          <button
+            onClick={toggleFullscreen}
+            className="text-white bg-blue-600 hover:bg-blue-700 rounded-full p-2 transition-colors duration-200 shadow-lg"
+            title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
+          >
+            {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
+          </button>
+
+          <button
+            onClick={closePreview}
+            className="text-white bg-red-600 hover:bg-red-700 rounded-full p-2 transition-colors duration-200 shadow-lg"
+            title="Fechar player"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Título do Vídeo */}
+        <div className="absolute top-2 left-2 z-30 bg-black bg-opacity-60 text-white px-3 py-1 rounded-lg">
+          <h3 className="font-medium text-sm">{video?.nome || 'Visualização'}</h3>
+          {videos.length > 1 && (
+            <p className="text-xs opacity-80">Playlist: {indexAtual + 1}/{videos.length}</p>
+          )}
+        </div>
+
+        {video ? (
+          <div className={`w-full h-full ${isFullscreen ? 'p-0' : 'p-4 pt-12'}`}>
+            <UniversalVideoPlayer
+              src={buildVideoUrl(video.url || '')}
+              title={video.nome}
+              autoplay={true}
+              controls={true}
+              onEnded={proximoVideo}
+              onReady={() => setIsLoading(false)}
+              onError={() => {
+                setIsLoading(false);
+                toast.error('Erro ao carregar vídeo. Tentando método alternativo...');
+              }}
+              className="w-full h-full"
+            />
+
+            {/* Controles da playlist */}
+            {videos.length > 1 && (
+              <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 bg-black bg-opacity-80 text-white px-4 py-2 rounded-lg shadow-lg">
+                <div className="flex items-center justify-between space-x-4">
+                  <button
+                    onClick={goToPreviousVideo}
+                    disabled={indexAtual === 0}
+                    className="px-3 py-1 bg-gray-700 rounded disabled:opacity-50 hover:bg-gray-600 transition-colors duration-200 text-xs font-medium"
+                  >
+                    ← Anterior
+                  </button>
+
+                  <div className="text-center">
+                    <div className="text-xs font-medium">
+                      {indexAtual + 1} / {videos.length}
+                    </div>
+                    <div className="text-xs text-gray-300 max-w-32 truncate">
+                      {video.nome}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={goToNextVideo}
+                    disabled={indexAtual === videos.length - 1}
+                    className="px-3 py-1 bg-gray-700 rounded disabled:opacity-50 hover:bg-gray-600 transition-colors duration-200 text-xs font-medium"
+                  >
+                    Próximo →
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center justify-center h-full text-white">
+            <p>Nenhum vídeo para reproduzir</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Modal de confirmação personalizado
+function ModalConfirmacao({
+  aberto,
+  onFechar,
+  onConfirmar,
+  titulo,
+  mensagem,
+  detalhes,
+}: {
+  aberto: boolean;
+  onFechar: () => void;
+  onConfirmar: () => void;
+  titulo: string;
+  mensagem: string;
+  detalhes?: string;
+}) {
+  if (!aberto) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">{titulo}</h3>
+        <p className="text-gray-700 mb-4">{mensagem}</p>
+        {detalhes && (
+          <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3 mb-4">
+            <p className="text-sm text-yellow-800">{detalhes}</p>
+          </div>
+        )}
+        <div className="flex justify-end space-x-3">
+          <button
+            onClick={onFechar}
+            className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 transition-colors"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={onConfirmar}
+            className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors"
+          >
+            Confirmar Exclusão
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function GerenciarVideos() {
+  const { getToken, user } = useAuth();
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderSelecionada, setFolderSelecionada] = useState<Folder | null>(null);
+  const [novoFolderNome, setNovoFolderNome] = useState("");
+  const [uploadFiles, setUploadFiles] = useState<FileList | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [modalAberta, setModalAberta] = useState(false);
+  const [videoModalAtual, setVideoModalAtual] = useState<Video | null>(null);
+  const [playlistModal, setPlaylistModal] = useState<Video[] | null>(null);
+  // Função otimizada para vídeos SSH
+  const buildOptimizedSSHUrl = (videoId: string) => {
+    const token = localStorage.getItem('auth_token');
+    // Usar proxy direto para melhor performance
+    return `/api/videos-ssh/proxy-stream/${videoId}${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+  };
+  
+  // Estados para SSH
+  const [sshVideos, setSSHVideos] = useState<SSHVideo[]>([]);
+  const [loadingSSH, setLoadingSSH] = useState(false);
+  const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
+  const [editingVideo, setEditingVideo] = useState<EditingVideo | null>(null);
+  const [folderUsage, setFolderUsage] = useState<FolderUsage | null>(null);
+  const [loadingUsage, setLoadingUsage] = useState(false);
+  const [uploadError, setUploadError] = useState<string>('');
+  const [spaceWarning, setSpaceWarning] = useState<string>('');
+
+  // Estados para confirmação
+  const [modalConfirmacao, setModalConfirmacao] = useState({
+    aberto: false,
+    tipo: '' as 'video' | 'folder',
+    item: null as any,
+    titulo: '',
+    mensagem: '',
+    detalhes: ''
+  });
+
+  // Função para construir URL do vídeo
+  const buildVideoUrl = (url: string) => {
+    if (!url) return '';
+    if (url.startsWith('http')) return url;
+    if (url.includes('/api/videos-ssh/')) return url;
+    const cleanPath = url.replace(/^\/+/, '');
+    return `/content/${cleanPath}`;
+  };
+
+  // Função para construir URL HLS para vídeos SSH
+  const buildHLSVideoUrl = (video: SSHVideo) => {
+    return `/api/videos-ssh/stream/${video.id}`;
+  };
+
+  useEffect(() => {
+    fetchFolders();
+    loadCacheStatus();
+  }, []);
+
+  useEffect(() => {
+    if (folderSelecionada) {
+      fetchSSHVideos(folderSelecionada.nome);
+      loadFolderUsage(folderSelecionada.id);
+      setUploadError('');
+      setSpaceWarning('');
+    } else {
+      setSSHVideos([]);
+      setFolderUsage(null);
+      setUploadError('');
+      setSpaceWarning('');
+    }
+  }, [folderSelecionada]);
+
+  const fetchFolders = async () => {
     try {
-      remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
-    } catch (decodeError) {
-      return res.status(400).json({ error: 'ID de vídeo inválido' });
+      const token = await getToken();
+      const response = await fetch("/api/folders", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await response.json();
+      setFolders(data);
+      if (data.length > 0) setFolderSelecionada(data[0]);
+    } catch {
+      toast.error("Erro ao carregar pastas");
     }
+  };
 
-    console.log(`🎥 Solicitação de stream SSH: ${remotePath} para usuário ${userLogin}`);
-
-    // Verificar se o caminho pertence ao usuário
-    if (!remotePath.includes(`/${userLogin}/`)) {
-      return res.status(403).json({ error: 'Acesso negado ao vídeo' });
+  const fetchSSHVideos = async (folderName: string) => {
+    setLoadingSSH(true);
+    try {
+      const token = await getToken();
+      if (!token) {
+        toast.error('Token de autenticação não encontrado');
+        return;
+      }
+      
+      const response = await fetch(`/api/videos-ssh/list?folder=${encodeURIComponent(folderName)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      
+      if (!response.ok) throw new Error('Erro ao carregar vídeos do servidor');
+      
+      const data = await response.json();
+      if (data.success) {
+        setSSHVideos(data.videos);
+        console.log(`📹 Carregados ${data.videos.length} vídeos via SSH`);
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (error) {
+      console.error('Erro ao carregar vídeos SSH:', error);
+      toast.error("Erro ao carregar vídeos do servidor");
+      setSSHVideos([]);
+    } finally {
+      setLoadingSSH(false);
     }
+  };
 
-    // Buscar servidor do usuário
-    const [serverRows] = await db.execute(
-      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
-      [user.codigo]
-    );
+  const loadCacheStatus = async () => {
+    try {
+      const token = await getToken();
+      const response = await fetch('/api/videos-ssh/cache/status', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setCacheStatus(data.cache);
+        }
+      }
+    } catch (error) {
+      console.error('Erro ao carregar status do cache:', error);
+    }
+  };
 
-    const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
+  const loadFolderUsage = async (folderId: number) => {
+    setLoadingUsage(true);
+    setSpaceWarning('');
+    try {
+      const token = await getToken();
+      const response = await fetch(`/api/videos-ssh/folders/${folderId}/usage`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setFolderUsage(data.usage);
+          
+          // Verificar se está próximo do limite
+          if (data.usage.percentage > 90) {
+            setSpaceWarning('Atenção: Espaço quase esgotado! Considere excluir vídeos antigos.');
+          } else if (data.usage.percentage > 75) {
+            setSpaceWarning('Aviso: Mais de 75% do espaço utilizado.');
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Erro ao carregar uso da pasta:', error);
+    } finally {
+      setLoadingUsage(false);
+    }
+  };
 
-    // Verificar se arquivo existe no servidor
-    const availability = await VideoSSHManager.checkVideoAvailability(serverId, remotePath);
+  const syncFolderWithServer = async () => {
+    if (!folderSelecionada) return;
     
-    if (!availability.available) {
-      return res.status(404).json({ 
-        error: 'Vídeo não encontrado',
-        details: availability.reason 
+    if (!confirm('Deseja sincronizar esta pasta com o servidor? Isso pode levar alguns minutos.')) {
+      return;
+    }
+    
+    try {
+      const token = await getToken();
+      const response = await fetch(`/api/videos-ssh/folders/${folderSelecionada.id}/sync`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      
+      const data = await response.json();
+      if (data.success) {
+        toast.success(data.message);
+        fetchSSHVideos(folderSelecionada.nome);
+        loadFolderUsage(folderSelecionada.id);
+      } else {
+        toast.error(data.error);
+      }
+    } catch (error) {
+      console.error('Erro na sincronização:', error);
+      toast.error('Erro na sincronização com servidor');
+    }
+  };
+
+  const clearCache = async () => {
+    if (!confirm('Deseja limpar o cache de vídeos? Isso pode afetar a reprodução de vídeos em andamento.')) {
+      return;
+    }
+    
+    try {
+      const token = await getToken();
+      const response = await fetch('/api/videos-ssh/cache/clear', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      
+      const data = await response.json();
+      if (data.success) {
+        toast.success(data.message);
+        loadCacheStatus();
+      } else {
+        toast.error(data.error);
+      }
+    } catch (error) {
+      console.error('Erro ao limpar cache:', error);
+      toast.error('Erro ao limpar cache');
+    }
+  };
+
+  const handleFilesChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    const videosOnly = Array.from(files).filter(f => f.type.startsWith("video/"));
+    if (videosOnly.length !== files.length) {
+      toast.error("Apenas arquivos de vídeo são permitidos");
+      e.target.value = "";
+      setUploadFiles(null);
+      return;
+    }
+    const MAX_SIZE = 2 * 1024 * 1024 * 1024;
+    const oversizedFiles = videosOnly.filter(f => f.size > MAX_SIZE);
+    if (oversizedFiles.length > 0) {
+      toast.error(`Arquivos muito grandes: ${oversizedFiles.map(f => f.name).join(", ")}`);
+      e.target.value = "";
+      setUploadFiles(null);
+      return;
+    }
+    setUploadFiles(files);
+  };
+
+  const getVideoDuration = (file: File): Promise<number> => {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const video = document.createElement("video");
+      video.preload = "metadata";
+      video.src = url;
+      video.onloadedmetadata = () => {
+        URL.revokeObjectURL(url);
+        resolve(video.duration);
+      };
+      video.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(0);
+      };
+    });
+  };
+
+  const uploadVideos = async () => {
+    if (!folderSelecionada || !uploadFiles || uploadFiles.length === 0) {
+      toast.error("Selecione uma pasta e ao menos um arquivo para upload");
+      return;
+    }
+    
+    setUploadError('');
+    setUploading(true);
+    setUploadProgress(0);
+    
+    try {
+      const token = await getToken();
+      let successCount = 0;
+      let errorCount = 0;
+      
+      for (const file of Array.from(uploadFiles)) {
+        const formData = new FormData();
+        formData.append("video", file);
+        const duracao = await getVideoDuration(file);
+        formData.append("duracao", duracao.toString());
+        formData.append("tamanho", file.size.toString());
+
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", `/api/videos/upload?folder_id=${folderSelecionada.id.toString()}`);
+          xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              const progressoAtual = (e.loaded / e.total) * 100;
+              setUploadProgress(progressoAtual);
+            }
+          };
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              const videoData = JSON.parse(xhr.responseText);
+              toast.success(`${file.name} enviado com sucesso!`);
+              successCount++;
+              if (folderSelecionada) {
+                fetchSSHVideos(folderSelecionada.nome);
+                // Atualizar uso da pasta após upload bem-sucedido
+                loadFolderUsage(folderSelecionada.id);
+              }
+              resolve();
+            } else {
+              const errorData = JSON.parse(xhr.responseText);
+              const errorMessage = errorData.error || `Erro ao enviar ${file.name}`;
+              
+              // Verificar se é erro de espaço
+              if (errorMessage.includes('Espaço insuficiente') || errorMessage.includes('espaço')) {
+                setUploadError(`❌ ${errorMessage}`);
+                toast.error(errorMessage);
+              } else if (errorMessage.includes('Formato') || errorMessage.includes('suportado')) {
+                setUploadError(`❌ ${errorMessage}`);
+                toast.error(errorMessage);
+              } else {
+                toast.error(errorMessage);
+              }
+              
+              errorCount++;
+              reject();
+            }
+          };
+          xhr.onerror = () => {
+            const errorMsg = `Erro de conexão ao enviar ${file.name}`;
+            toast.error(errorMsg);
+            errorCount++;
+            reject();
+          };
+          xhr.send(formData);
+        });
+      }
+      
+      // Mostrar resumo final
+      if (successCount > 0 && errorCount === 0) {
+        toast.success(`✅ Todos os ${successCount} vídeo(s) enviados com sucesso!`);
+      } else if (successCount > 0 && errorCount > 0) {
+        toast.warning(`⚠️ ${successCount} vídeo(s) enviados, ${errorCount} falharam`);
+      }
+      
+    } catch {
+      toast.error("Erro no upload de vídeos");
+    } finally {
+      setUploading(false);
+      setUploadFiles(null);
+      setUploadProgress(0);
+      setUploadError('');
+      const inputFile = document.getElementById("input-upload-videos") as HTMLInputElement;
+      if (inputFile) inputFile.value = "";
+    }
+  };
+
+  const criarFolder = async () => {
+    if (!novoFolderNome.trim()) return;
+    try {
+      const token = await getToken();
+      const response = await fetch("/api/folders", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ nome: novoFolderNome.trim() })
+      });
+      if (!response.ok) throw new Error();
+      const novaFolder = await response.json();
+      setFolders(prev => [...prev, novaFolder]);
+      setNovoFolderNome("");
+      toast.success("Pasta criada com sucesso!");
+    } catch {
+      toast.error("Erro ao criar pasta");
+    }
+  };
+
+  const confirmarDeletarFolder = (folder: Folder) => {
+    setModalConfirmacao({
+      aberto: true,
+      tipo: 'folder',
+      item: folder,
+      titulo: 'Confirmar Exclusão da Pasta',
+      mensagem: `Deseja realmente excluir a pasta "${folder.nome}"?`,
+      detalhes: 'Esta ação não pode ser desfeita. Certifique-se de que a pasta não contém vídeos importantes.'
+    });
+  };
+
+  const confirmarDeletarSSHVideo = (video: SSHVideo) => {
+    setModalConfirmacao({
+      aberto: true,
+      tipo: 'video',
+      item: video,
+      titulo: 'Confirmar Exclusão do Vídeo',
+      mensagem: `Deseja realmente excluir o vídeo "${video.nome}" do servidor?`,
+      detalhes: 'Esta ação não pode ser desfeita e o arquivo será removido permanentemente do servidor Wowza.'
+    });
+  };
+
+  const executarDelecao = async () => {
+    const { tipo, item } = modalConfirmacao;
+
+    try {
+      const token = await getToken();
+
+      if (tipo === 'folder') {
+        const response = await fetch(`/api/folders/${item.id}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          toast.error(errorData.details || errorData.error || "Erro ao excluir pasta");
+          return;
+        }
+
+        setFolders(prev => prev.filter(f => f.id !== item.id));
+        if (folderSelecionada?.id === item.id) {
+          setFolderSelecionada(null);
+          setSSHVideos([]);
+        }
+        toast.success("Pasta excluída com sucesso!");
+
+      } else if (tipo === 'video' && item.id && typeof item.id === 'string') {
+        const response = await fetch(`/api/videos-ssh/${item.id}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          toast.error(errorData.details || errorData.error || "Erro ao excluir vídeo");
+          return;
+        }
+
+        setSSHVideos(prev => prev.filter(v => v.id !== item.id));
+        toast.success("Vídeo excluído com sucesso do servidor!");
+        
+        // Atualizar uso da pasta após exclusão
+        if (folderSelecionada) {
+          loadFolderUsage(folderSelecionada.id);
+        }
+      }
+    } catch (error) {
+      toast.error("Erro ao excluir item");
+      console.error('Erro na exclusão:', error);
+    } finally {
+      setModalConfirmacao({
+        aberto: false,
+        tipo: '' as any,
+        item: null,
+        titulo: '',
+        mensagem: '',
+        detalhes: ''
       });
     }
+  };
 
-    // Configurar headers para streaming de vídeo
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Range, Authorization');
-    res.setHeader('Accept-Ranges', 'bytes');
-    
-    // Definir Content-Type baseado na extensão
-    const extension = path.extname(remotePath).toLowerCase();
-    switch (extension) {
-      case '.mp4':
-        res.setHeader('Content-Type', 'video/mp4');
-        break;
-      case '.avi':
-        res.setHeader('Content-Type', 'video/x-msvideo');
-        break;
-      case '.mov':
-        res.setHeader('Content-Type', 'video/quicktime');
-        break;
-      case '.wmv':
-        res.setHeader('Content-Type', 'video/x-ms-wmv');
-        break;
-      case '.flv':
-        res.setHeader('Content-Type', 'video/x-flv');
-        break;
-      case '.webm':
-        res.setHeader('Content-Type', 'video/webm');
-        break;
-      case '.mkv':
-        res.setHeader('Content-Type', 'video/x-matroska');
-        break;
-      case '.3gp':
-        res.setHeader('Content-Type', 'video/3gpp');
-        break;
-      case '.3g2':
-        res.setHeader('Content-Type', 'video/3gpp2');
-        break;
-      case '.ts':
-        res.setHeader('Content-Type', 'video/mp2t');
-        break;
-      case '.mpg':
-      case '.mpeg':
-        res.setHeader('Content-Type', 'video/mpeg');
-        break;
-      case '.ogv':
-        res.setHeader('Content-Type', 'video/ogg');
-        break;
-      case '.m4v':
-        res.setHeader('Content-Type', 'video/mp4');
-        break;
-      case '.asf':
-        res.setHeader('Content-Type', 'video/x-ms-asf');
-        break;
-      default:
-        res.setHeader('Content-Type', 'video/mp4');
-    }
-    
-    // Cache para vídeos
-    res.setHeader('Cache-Control', 'public, max-age=3600');
+  const startEditingVideo = (video: SSHVideo) => {
+    setEditingVideo({
+      id: video.id,
+      nome: video.nome,
+      originalNome: video.nome
+    });
+  };
+
+  const saveVideoEdit = async () => {
+    if (!editingVideo) return;
 
     try {
-      // Obter stream do vídeo via SSH
-      const streamResult = await VideoSSHManager.getVideoStream(serverId, remotePath, videoId);
-      
-      if (!streamResult.success) {
-        throw new Error('Falha ao obter stream do vídeo');
+      const token = await getToken();
+      const response = await fetch(`/api/videos-ssh/${editingVideo.id}/rename`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          novo_nome: editingVideo.nome
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        toast.error(errorData.error || 'Erro ao renomear vídeo');
+        return;
       }
 
-      if (streamResult.type === 'local') {
-        // Vídeo foi baixado para cache local, servir arquivo local
-        const localPath = streamResult.path;
-        
-        // Verificar se arquivo local existe
+      toast.success('Vídeo renomeado com sucesso!');
+      setEditingVideo(null);
+      
+      if (folderSelecionada) {
+        fetchSSHVideos(folderSelecionada.nome);
+      }
+    } catch (error) {
+      console.error('Erro ao renomear vídeo:', error);
+      toast.error('Erro ao renomear vídeo');
+    }
+  };
+
+  const cancelEdit = () => {
+    setEditingVideo(null);
+  };
+
+  const abrirModalVideo = (video: Video) => {
+    console.log('Abrindo modal para vídeo:', video);
+    
+    // Verificar se há token antes de abrir o vídeo
+    const token = localStorage.getItem('auth_token');
+    if (!token) {
+      toast.error('Token de autenticação não encontrado. Faça login novamente.');
+      return;
+    }
+    
+    // Para vídeos SSH, usar URL direta do Wowza para melhor performance
+    let videoUrl = video.url || '';
+    if (videoUrl.includes('/api/videos-ssh/')) {
+      const videoId = videoUrl.split('/stream/')[1]?.split('?')[0];
+      if (videoId) {
         try {
-          const stats = await fs.stat(localPath);
-          const fileSize = stats.size;
+          // Construir URL direta do Wowza para melhor performance
+          const remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
+          const isProduction = window.location.hostname !== 'localhost';
+          const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+          const wowzaUser = 'admin';
+          const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
           
-          // Suporte a Range requests para streaming
-          const range = req.headers.range;
-          if (range) {
-            const parts = range.replace(/bytes=/, "").split("-");
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-            const chunksize = (end - start) + 1;
-            
-            res.status(206);
-            res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-            res.setHeader('Content-Length', chunksize);
-            
-            // Criar stream do arquivo
-            const readStream = require('fs').createReadStream(localPath, { start, end });
-            readStream.pipe(res);
-          } else {
-            // Servir arquivo completo
-            res.setHeader('Content-Length', fileSize);
-            const readStream = require('fs').createReadStream(localPath);
-            readStream.pipe(res);
-          }
-          
-          console.log(`✅ Servindo vídeo SSH via cache local: ${path.basename(remotePath)}`);
-        } catch (fileError) {
-          console.error('Erro ao acessar arquivo local:', fileError);
-          return res.status(500).json({ error: 'Erro ao acessar arquivo de vídeo' });
+          const relativePath = remotePath.replace('/usr/local/WowzaStreamingEngine/content', '');
+          videoUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content${relativePath}`;
+        } catch (error) {
+          console.warn('Erro ao construir URL direta, usando otimizada:', error);
+    const syncResult = await syncVideosToDatabase(videos, userLogin, folderName, userId);
         }
-      } else if (streamResult.type === 'proxy') {
-        // Usar proxy direto para arquivos grandes
-        const proxyUrl = `/api/videos-ssh/proxy-stream/${videoId}?token=${encodeURIComponent(token)}`;
-        console.log(`🔄 Redirecionando para proxy direto: ${proxyUrl}`);
-        res.redirect(proxyUrl);
-      } else {
-        // Fallback: redirecionar para URL externa do Wowza
-        const isProduction = process.env.NODE_ENV === 'production';
+      }
+    }
+    
+    const videoWithUrl = {
+      ...video,
+      url: videoUrl
+    };
+    
+    setVideoModalAtual(videoWithUrl);
+    setPlaylistModal(null);
+    setModalAberta(true);
+  };
+
+  const abrirModalPlaylist = () => {
+    if (!folderSelecionada) return;
+    
+    // Verificar se há token antes de abrir a playlist
+    const token = localStorage.getItem('auth_token');
+    if (!token) {
+      toast.error('Token de autenticação não encontrado. Faça login novamente.');
+      return;
+    }
+    
+    const videosParaPlaylist = sshVideos.map(v => {      
+    
+    let syncedCount = 0;
+    let skippedCount = 0;
+      // Para playlist, usar URL direta do Wowza (porta 6980) para arquivos MP4
+      let videoUrl;
+      try {
+        const isProduction = window.location.hostname !== 'localhost';
         const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
         const wowzaUser = 'admin';
         const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
         
-        // Construir caminho relativo para o Wowza
-        const relativePath = remotePath.replace('/usr/local/WowzaStreamingEngine/content', '');
-        const externalUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content${relativePath}`;
+        // Construir URL direta para o arquivo
+        videoUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${v.userLogin}/${v.folder}/${v.nome}`;
+      } catch (error) {
+        console.warn('Erro ao construir URL direta, usando proxy:', error);
+        videoUrl = `/content/${v.userLogin}/${v.folder}/${v.nome}`;
+      }
+      
+      return {
+      id: 0,
+      nome: v.nome,
+        url: videoUrl,
+      duracao: v.duration,
+      tamanho: v.size
+      server_id: serverId,
+      synced_to_database: syncResult.synced,
+      total_videos: videos.length
+    });
+    
+    console.log('Abrindo playlist modal com vídeos:', videosParaPlaylist);
+    setPlaylistModal(videosParaPlaylist);
+    setVideoModalAtual(null);
+    setModalAberta(true);
+  };
+
+  const openVideoInNewTab = (video: SSHVideo) => {
+    // Abrir vídeo SSH em nova aba usando URL otimizada
+    const token = localStorage.getItem('auth_token');
+    if (!token) {
+      toast.error('Token de autenticação não encontrado. Faça login novamente.');
+      return;
+    }
+    
+    // Para nova aba, sempre usar URL direta do Wowza (porta 6980)
+    try {
+      const isProduction = window.location.hostname !== 'localhost';
+      const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+      const wowzaUser = 'admin';
+      const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
+      
+      // URL direta do arquivo no Wowza
+      const streamUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${video.userLogin}/${video.folder}/${video.nome}`;
+      
+        // Construir URL SSH para o vídeo
+        const sshVideoUrl = `/api/videos-ssh/stream/${video.id}`;
         
-        console.log(`🔄 Redirecionando para Wowza externo: ${externalUrl}`);
-        res.redirect(externalUrl);
+        // Verificar se o vídeo já existe na tabela videos (por nome e pasta)
+    } catch (error) {
+          'SELECT id, url FROM videos WHERE nome = ? AND (url LIKE ? OR url = ?)',
+          [video.nome, `%${userLogin}/${folderName}%`, sshVideoUrl]
+      window.open(streamUrl, '_blank');
+    }
+  };
+      const token = await getToken();
+      if (!token) {
+        toast.error('Token de autenticação não encontrado');
+        return;
       }
-    } catch (streamError) {
-      console.error('Erro ao obter stream SSH:', streamError);
-      return res.status(500).json({ 
-        error: 'Erro ao acessar vídeo no servidor',
-        details: streamError.message 
+      
+      const response = await fetch(`/api/videos-ssh/info/${video.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
       });
-    }
-  } catch (error) {
-    console.error('❌ Erro no stream SSH:', error);
-    return res.status(500).json({ 
-      error: 'Erro interno do servidor',
-      details: error.message 
-    });
-  }
-});
-
-// GET /api/videos-ssh/info/:videoId - Informações do vídeo
-router.get('/info/:videoId', authMiddleware, async (req, res) => {
-  try {
-    const videoId = req.params.videoId;
-    const userId = req.user.id;
-    const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
-
-    // Decodificar videoId
-    let remotePath;
-    try {
-      remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
-    } catch (decodeError) {
-      return res.status(400).json({ error: 'ID de vídeo inválido' });
-    }
-
-    // Verificar se o caminho pertence ao usuário
-    if (!remotePath.includes(`/${userLogin}/`)) {
-      return res.status(403).json({ error: 'Acesso negado ao vídeo' });
-    }
-
-    // Buscar servidor do usuário
-    const [serverRows] = await db.execute(
-      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
-      [userId]
-    );
-
-    const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
-
-    // Obter informações do vídeo
-    const videoInfo = await VideoSSHManager.getVideoInfo(serverId, remotePath);
-
-    if (!videoInfo) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Vídeo não encontrado' 
-      });
-    }
-
-    res.json({
-      success: true,
-      video_info: videoInfo
-    });
-  } catch (error) {
-    console.error('Erro ao obter informações do vídeo:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erro ao obter informações do vídeo',
-      details: error.message 
-    });
-  }
-});
-
-// DELETE /api/videos-ssh/:videoId - Remove vídeo do servidor
-router.delete('/:videoId', authMiddleware, async (req, res) => {
-  try {
-    const videoId = req.params.videoId;
-    const userId = req.user.id;
-    const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
-
-    // Decodificar videoId
-    let remotePath;
-    try {
-      remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
-    } catch (decodeError) {
-      return res.status(400).json({ error: 'ID de vídeo inválido' });
-    }
-
-    // Verificar se o caminho pertence ao usuário
-    if (!remotePath.includes(`/${userLogin}/`)) {
-      return res.status(403).json({ error: 'Acesso negado ao vídeo' });
-    }
-
-    // Buscar servidor do usuário
-    const [serverRows] = await db.execute(
-      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
-      [userId]
-    );
-
-    const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
-
-    // Remover vídeo do servidor
-    const result = await VideoSSHManager.deleteVideoFromServer(serverId, remotePath);
-
-    if (result.success) {
-      // Também remover do banco de dados se existir
-      try {
-        await db.execute(
-          'DELETE FROM playlists_videos WHERE path_video LIKE ?',
-          [`%${path.basename(remotePath)}`]
-        );
-      } catch (dbError) {
-        console.warn('Aviso: Erro ao remover do banco:', dbError.message);
-      }
-
-      res.json({
-        success: true,
-        message: 'Vídeo removido com sucesso do servidor'
-      });
-    } else {
-      throw new Error('Falha ao remover vídeo do servidor');
-    }
-  } catch (error) {
-    console.error('Erro ao remover vídeo SSH:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erro ao remover vídeo do servidor',
-      details: error.message 
-    });
-  }
-});
-
-// PUT /api/videos-ssh/:videoId/rename - Renomear vídeo no servidor
-router.put('/:videoId/rename', authMiddleware, async (req, res) => {
-  try {
-    const videoId = req.params.videoId;
-    const { novo_nome } = req.body;
-    const userId = req.user.id;
-    const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
-
-    if (!novo_nome) {
-      return res.status(400).json({ error: 'Novo nome é obrigatório' });
-    }
-
-    // Decodificar videoId
-    let remotePath;
-    try {
-      remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
-    } catch (decodeError) {
-      return res.status(400).json({ error: 'ID de vídeo inválido' });
-    }
-
-    // Verificar se o caminho pertence ao usuário
-    if (!remotePath.includes(`/${userLogin}/`)) {
-      return res.status(403).json({ error: 'Acesso negado ao vídeo' });
-    }
-
-    // Buscar servidor do usuário
-    const [serverRows] = await db.execute(
-      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
-      [userId]
-    );
-
-    const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
-
-    // Construir novo caminho
-    const directory = path.dirname(remotePath);
-    const extension = path.extname(remotePath);
-    const newRemotePath = path.join(directory, `${novo_nome}${extension}`);
-
-    // Renomear arquivo no servidor
-    const command = `mv "${remotePath}" "${newRemotePath}"`;
-    await SSHManager.executeCommand(serverId, command);
-
-    console.log(`✅ Vídeo renomeado: ${remotePath} -> ${newRemotePath}`);
-
-    res.json({
-      success: true,
-      message: 'Vídeo renomeado com sucesso',
-      new_path: newRemotePath
-    });
-  } catch (error) {
-    console.error('Erro ao renomear vídeo SSH:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erro ao renomear vídeo no servidor',
-      details: error.message 
-    });
-  }
-});
-
-// GET /api/videos-ssh/cache/status - Status do cache
-router.get('/cache/status', authMiddleware, async (req, res) => {
-  try {
-    const cacheStatus = await VideoSSHManager.getCacheStatus();
-    
-    res.json({
-      success: true,
-      cache: cacheStatus
-    });
-  } catch (error) {
-    console.error('Erro ao obter status do cache:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erro ao obter status do cache',
-      details: error.message 
-    });
-  }
-});
-
-// POST /api/videos-ssh/cache/clear - Limpar cache
-router.post('/cache/clear', authMiddleware, async (req, res) => {
-  try {
-    const result = await VideoSSHManager.clearCache();
-    
-    res.json({
-      success: true,
-      message: `Cache limpo: ${result.removedFiles} arquivos removidos`,
-      removed_files: result.removedFiles
-    });
-  } catch (error) {
-    console.error('Erro ao limpar cache:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erro ao limpar cache',
-      details: error.message 
-    });
-  }
-});
-
-// GET /api/videos-ssh/folders/:folderId/usage - Uso da pasta
-router.get('/folders/:folderId/usage', authMiddleware, async (req, res) => {
-  try {
-    const folderId = req.params.folderId;
-    const userId = req.user.id;
-
-    // Buscar dados da pasta
-    const [folderRows] = await db.execute(
-      'SELECT identificacao, espaco, espaco_usado, codigo_servidor FROM streamings WHERE codigo = ? AND codigo_cliente = ?',
-      [folderId, userId]
-    );
-
-    if (folderRows.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Pasta não encontrada' 
-      });
-    }
-
-    const folder = folderRows[0];
-    
-    // Recalcular uso real baseado nos vídeos no banco
-    const [videoUsageRows] = await db.execute(
-      `SELECT COALESCE(SUM(CEIL(tamanho_arquivo / (1024 * 1024))), 0) as real_used_mb
-       FROM playlists_videos 
-       WHERE path_video LIKE ?`,
-      [`%/${folder.identificacao}/%`]
-    );
-    
-    const realUsedMB = videoUsageRows[0]?.real_used_mb || 0;
-    const databaseUsedMB = folder.espaco_usado || 0;
-    const totalMB = folder.espaco || 1000;
-    
-    // Usar o maior valor entre banco e cálculo real
-    const usedMB = Math.max(realUsedMB, databaseUsedMB);
-    const percentage = Math.round((usedMB / totalMB) * 100);
-    const availableMB = totalMB - usedMB;
-    
-    // Atualizar banco com valor correto se houver diferença significativa
-    if (Math.abs(usedMB - databaseUsedMB) > 5) {
-      await db.execute(
-        'UPDATE streamings SET espaco_usado = ? WHERE codigo = ?',
-        [usedMB, folderId]
-      );
-      console.log(`📊 Uso de espaço atualizado para pasta ${folder.identificacao}: ${usedMB}MB`);
-    }
-
-    res.json({
-      success: true,
-      usage: {
-        used: usedMB,
-        total: totalMB,
-        percentage: percentage,
-        available: availableMB,
-        database_used: databaseUsedMB,
-        real_used: realUsedMB,
-        last_updated: new Date().toISOString()
-      }
-    });
-  } catch (error) {
-    console.error('Erro ao obter uso da pasta:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erro ao obter uso da pasta',
-      details: error.message 
-    });
-  }
-});
-
-// POST /api/videos-ssh/folders/:folderId/sync - Sincronizar pasta com servidor
-router.post('/folders/:folderId/sync', authMiddleware, async (req, res) => {
-  try {
-    const folderId = req.params.folderId;
-    const userId = req.user.id;
-    const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
-
-    // Buscar dados da pasta
-    const [folderRows] = await db.execute(
-      'SELECT identificacao, codigo_servidor FROM streamings WHERE codigo = ? AND codigo_cliente = ?',
-      [folderId, userId]
-    );
-
-    if (folderRows.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Pasta não encontrada' 
-      });
-    }
-
-    const folder = folderRows[0];
-    const serverId = folder.codigo_servidor || 1;
-    const folderName = folder.identificacao;
-
-    // Listar vídeos do servidor
-    const sshVideos = await VideoSSHManager.listVideosFromServer(serverId, userLogin, folderName);
-    
-    // Sincronizar com a tabela videos
-    await syncVideosToDatabase(sshVideos, userLogin, folderName, userId);
-    
-    // Limpar arquivos órfãos
-    const cleanupResult = await VideoSSHManager.cleanupOrphanedFiles(serverId, userLogin);
-    
-    // Garantir que diretório existe
-    await SSHManager.createUserDirectory(serverId, userLogin);
-    await SSHManager.createUserFolder(serverId, userLogin, folderName);
-
-    res.json({
-      success: true,
-      message: `Pasta ${folderName} sincronizada com sucesso. ${sshVideos.length} vídeo(s) processado(s).`,
-      videos_synced: sshVideos.length,
-      cleanup: cleanupResult
-    });
-  } catch (error) {
-    console.error('Erro ao sincronizar pasta:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Erro ao sincronizar pasta com servidor',
-      details: error.message 
-    });
-  }
-});
-
-// Função para sincronizar vídeos SSH com a tabela videos
-async function syncVideosToDatabase(sshVideos, userLogin, folderName, userId) {
-  try {
-    console.log(`🔄 Sincronizando ${sshVideos.length} vídeos SSH com o banco de dados...`);
-    
-    for (const video of sshVideos) {
-      try {
-        // Verificar se o vídeo já existe na tabela videos
-        const [existingRows] = await db.execute(
-          'SELECT id FROM videos WHERE nome = ? AND url LIKE ?',
-          [video.nome, `%${userLogin}/${folderName}%`]
-        );
-
-        if (existingRows.length === 0) {
-          // Construir URL correta para o banco
-          const videoUrl = `/content/${userLogin}/${folderName}/${video.nome}`;
-          
-          // Buscar ou criar playlist padrão para vídeos SSH
-          let playlistId = await getOrCreateSSHPlaylist(userId, folderName);
-          
-          // Inserir vídeo na tabela videos
-          await db.execute(
-            `INSERT INTO videos (nome, descricao, url, duracao, playlist_id, created_at, updated_at) 
-             VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
-            [
-              video.nome,
-              `Vídeo sincronizado via SSH da pasta ${folderName}`,
-              videoUrl,
-              video.duration || 0,
-              playlistId
-            ]
-          );
-          
-          console.log(`✅ Vídeo ${video.nome} sincronizado com o banco`);
+      
+              sshVideoUrl,
+        const data = await response.json();
+        if (data.success && data.video_info) {
+          const info = data.video_info;
+          toast.success(`Vídeo íntegro: ${info.duration}s, ${info.codec}, ${info.width}x${info.height}`);
+        } else {
+          syncedCount++;
+          toast.warning('Não foi possível verificar a integridade do vídeo');
+        } else {
+          // Atualizar URL se necessário (migração de URLs antigas)
+          const existingVideo = existingRows[0];
+          if (existingVideo.url !== sshVideoUrl && !existingVideo.url.includes('/api/videos-ssh/')) {
+            await db.execute(
+              'UPDATE videos SET url = ?, updated_at = NOW() WHERE id = ?',
+              [sshVideoUrl, existingVideo.id]
+            );
+            console.log(`🔄 URL atualizada para vídeo ${video.nome}`);
+            syncedCount++;
+          } else {
+            skippedCount++;
+          }
         }
-      } catch (videoError) {
-        console.error(`Erro ao sincronizar vídeo ${video.nome}:`, videoError);
       }
+    } catch (error) {
+      console.error('Erro ao verificar integridade:', error);
+      toast.error('Erro ao verificar integridade do vídeo');
     }
+  };
+    console.log(`✅ Sincronização concluída para pasta ${folderName}: ${syncedCount} sincronizados, ${skippedCount} já existiam`);
     
-    console.log(`✅ Sincronização concluída para pasta ${folderName}`);
-  } catch (error) {
-    console.error('Erro na sincronização com banco:', error);
-  }
+    return {
+      synced: syncedCount,
+      skipped: skippedCount,
+      total: sshVideos.length
+    };
+  return (
+    <>
+      <div className="w-full max-w-full p-4 sm:p-6 flex flex-col lg:flex-row gap-6 min-h-[700px] overflow-x-hidden">
+        {/* Seção das Pastas */}
+        <section className="w-full lg:w-1/3 bg-gray-50 p-4 sm:p-6 rounded-lg shadow-md flex flex-col min-h-[500px] border border-gray-300">
+          <h2 className="text-2xl font-semibold mb-5 text-gray-900 flex justify-between items-center">
+            Pastas
+          </h2>
+          <ul className="flex-grow overflow-auto max-h-[300px] sm:max-h-[450px] space-y-2">
+            {folders.map((folder) => (
+              <li
+                key={folder.id}
+                className={`cursor-pointer p-2 rounded flex justify-between items-center ${folderSelecionada?.id === folder.id
+    const playlistName = `Pasta: ${folderName}`;
+                  : "hover:bg-blue-50 text-gray-800"
+                  }`}
+                onClick={() => setFolderSelecionada(folder)}
+                title={`Selecionar pasta ${folder.nome}`}
+              >
+                <span className="truncate flex-1 mr-2">{folder.nome}</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      abrirModalPlaylist();
+                    }}
+                    title={`Assistir todos os vídeos da pasta ${folder.nome} (SSH)`}
+                    className="text-blue-600 hover:text-blue-800 transition-colors duration-200"
+                    disabled={sshVideos.length === 0}
+                  >
+                    <Play size={16} />
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (sshVideos.length > 0) {
+                        openVideoInNewTab(sshVideos[0]);
+                      }
+                    }}
+                    title={`Abrir primeiro vídeo da pasta em nova aba`}
+                    className="text-green-600 hover:text-green-800 transition-colors duration-200"
+                    disabled={sshVideos.length === 0}
+                  >
+                    <Eye size={16} />
+                  </button>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      confirmarDeletarFolder(folder);
+                    }}
+                    className="text-red-600 hover:text-red-800 transition-colors duration-200"
+                    title="Excluir pasta"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          
+          <div className="mt-4 flex flex-col sm:flex-row gap-2 max-w-full">
+            <input
+              type="text"
+              value={novoFolderNome}
+              onChange={(e) => setNovoFolderNome(e.target.value)}
+              className="w-full sm:flex-grow min-w-0 border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
+              placeholder="Nova pasta"
+            />
+            <button
+              onClick={criarFolder}
+              className="w-full sm:w-auto bg-blue-600 text-white px-5 py-2 rounded hover:bg-blue-700 whitespace-nowrap transition-colors duration-200"
+            >
+              Criar
+            </button>
+          </div>
+        </section>
+
+        {/* Seção dos Vídeos */}
+        <section className="w-full lg:w-2/3 bg-gray-50 p-4 sm:p-6 rounded-lg shadow-md flex flex-col min-h-[500px] border border-gray-300">
+          <div className="flex items-center justify-between mb-5">
+            <h2 className="text-2xl font-semibold text-gray-900">
+              Vídeos {folderSelecionada ? ` - ${folderSelecionada.nome}` : ""}
+              <span className="text-blue-600 text-sm ml-2">(SSH)</span>
+            </h2>
+            
+            {/* Controles compactos */}
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => folderSelecionada && fetchSSHVideos(folderSelecionada.nome)}
+                disabled={loadingSSH}
+                className="flex items-center space-x-1 text-blue-600 hover:text-blue-800 text-sm px-2 py-1 rounded border border-blue-300 hover:bg-blue-50"
+              >
+                <RefreshCw className={`h-3 w-3 ${loadingSSH ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">Atualizar</span>
+              </button>
+              
+              {folderSelecionada && (
+                <button
+                  onClick={syncFolderWithServer}
+                  className="flex items-center space-x-1 text-green-600 hover:text-green-800 text-sm px-2 py-1 rounded border border-green-300 hover:bg-green-50"
+                >
+                  <Download className="h-3 w-3" />
+                  <span className="hidden sm:inline">Sync</span>
+                </button>
+              )}
+              
+              {cacheStatus && (
+                <button
+                  onClick={clearCache}
+                  className="flex items-center space-x-1 text-red-600 hover:text-red-800 text-sm px-2 py-1 rounded border border-red-300 hover:bg-red-50"
+                >
+                  <X className="h-3 w-3" />
+                  <span className="hidden sm:inline">Cache</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Informações compactas da pasta */}
+          {folderSelecionada && folderUsage && (
+            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-md space-y-2">
+              {spaceWarning && (
+                <div className="p-2 bg-yellow-50 border border-yellow-200 rounded text-sm text-yellow-800">
+                  ⚠️ {spaceWarning}
+                </div>
+              )}
+              <div className="flex items-center justify-between text-sm">
+                <div>
+                  <span className="font-medium text-blue-900">{sshVideos.length} vídeo(s)</span>
+                  <span className="text-blue-700 ml-2">
+                    • {formatarTamanho(folderUsage.used * 1024 * 1024)} / {formatarTamanho(folderUsage.total * 1024 * 1024)}
+                  </span>
+                  {folderUsage.last_updated && (
+                    <span className="text-blue-600 text-xs ml-2">
+                      (atualizado: {new Date(folderUsage.last_updated).toLocaleTimeString()})
+                    </span>
+                  )}
+                </div>
+                <div className="text-right">
+                  <span className={`font-medium ${
+                    folderUsage.percentage > 90 ? 'text-red-600' :
+                    folderUsage.percentage > 70 ? 'text-yellow-600' : 'text-green-600'
+                  }`}>
+                    {folderUsage.percentage}%
+                  </span>
+                  <div className="text-xs text-gray-500">
+                    {formatarTamanho((folderUsage.total - folderUsage.used) * 1024 * 1024)} livres
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2 w-full bg-gray-200 rounded-full h-1">
+                <div
+                  className={`h-1 rounded-full transition-all ${
+                    folderUsage.percentage > 90 ? 'bg-red-600' :
+                    folderUsage.percentage > 70 ? 'bg-yellow-600' : 'bg-green-600'
+                  }`}
+                  style={{ width: `${Math.min(folderUsage.percentage, 100)}%` }}
+                ></div>
+              </div>
+              {folderUsage.percentage > 95 && (
+                <div className="text-xs text-red-600 font-medium">
+                  🚨 Espaço crítico! Exclua vídeos para continuar enviando arquivos.
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Mensagens de erro de upload */}
+          {uploadError && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md">
+              <p className="text-red-800 text-sm">{uploadError}</p>
+              <p className="text-red-600 text-xs mt-1">
+                💡 Dica: Exclua vídeos antigos para liberar espaço ou entre em contato para aumentar seu limite.
+              </p>
+            </div>
+          )}
+          
+          <input
+            type="file"
+            id="input-upload-videos"
+            multiple
+            accept="video/*"
+            onChange={handleFilesChange}
+            disabled={!folderSelecionada || uploading}
+            className="mb-3"
+          />
+          {uploading && (
+            <div className="w-full bg-gray-200 rounded h-4 mb-4 overflow-hidden">
+              <div
+                className="bg-blue-600 h-4 transition-all"
+                style={{ width: `${uploadProgress}%` }}
+              />
+            </div>
+          )}
+          <button
+            onClick={uploadVideos}
+            disabled={!uploadFiles || uploadFiles.length === 0 || uploading || !folderSelecionada}
+            className="w-full sm:w-auto bg-blue-600 text-white px-5 py-3 rounded hover:bg-blue-700 disabled:opacity-50 transition-colors duration-200"
+          >
+            {uploading ? "Enviando..." : "Enviar"}
+          </button>
+
+          <div className="mt-8 flex-grow overflow-auto max-h-[400px] sm:max-h-[450px]">
+            {loadingSSH && (
+              <div className="flex items-center justify-center py-8">
+                <RefreshCw className="h-6 w-6 animate-spin text-blue-600 mr-2" />
+                <span className="text-gray-600">Carregando vídeos do servidor...</span>
+              </div>
+            )}
+            
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[600px] border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-gray-300">
+                  <th className="py-2 px-4">Nome</th>
+                  <th className="py-2 px-4 w-20 sm:w-28">Duração</th>
+                  <th className="py-2 px-4 w-20 sm:w-28">Tamanho</th>
+                  <th className="py-2 px-4 w-24 sm:w-32 hidden sm:table-cell">Pasta</th>
+                  <th className="py-2 px-4 w-16 sm:w-24">Assistir</th>
+                  <th className="py-2 px-4 w-32 sm:w-40">Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sshVideos.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="py-6 text-center text-gray-500 text-xs sm:text-sm">
+                      {loadingSSH ? 'Carregando...' : 'Nenhum vídeo encontrado no servidor'}
+                    </td>
+                  </tr>
+                ) : (
+                  sshVideos.map((video) => (
+                    <tr
+                      key={video.id}
+                      className="border-b border-gray-200 hover:bg-blue-50"
+                    >
+                      <td className="py-2 px-2 sm:px-4 truncate max-w-[120px] sm:max-w-xs">
+                        {editingVideo?.id === video.id ? (
+                          <div className="flex items-center space-x-2">
+                            <input
+                              type="text"
+                              value={editingVideo.nome}
+                              onChange={(e) => setEditingVideo(prev => prev ? {...prev, nome: e.target.value} : null)}
+                              className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs sm:text-sm"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') saveVideoEdit();
+                                if (e.key === 'Escape') cancelEdit();
+                              }}
+                              autoFocus
+                            />
+                            <button
+                              onClick={saveVideoEdit}
+                              className="text-green-600 hover:text-green-800"
+                              title="Salvar"
+                            >
+                              <Save size={14} />
+                            </button>
+                            <button
+                              onClick={cancelEdit}
+                              className="text-red-600 hover:text-red-800"
+                              title="Cancelar"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-between">
+                            <span className="truncate">{video.nome}</span>
+                            <div className="flex items-center space-x-1 ml-2">
+                              {video.size > 0 ? (
+                                <div className="w-2 h-2 bg-green-500 rounded-full" title="Arquivo válido" />
+                              ) : (
+                                <div className="w-2 h-2 bg-red-500 rounded-full" title="Arquivo pode estar corrompido" />
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 sm:px-4 text-xs sm:text-sm">{video.duration ? formatarDuracao(video.duration) : "--"}</td>
+                      <td className="py-2 px-2 sm:px-4 text-xs sm:text-sm">{video.size ? formatarTamanho(video.size) : "--"}</td>
+                      <td className="py-2 px-2 sm:px-4 text-xs text-gray-500 hidden sm:table-cell">{video.folder}</td>
+                      <td className="py-2 px-2 sm:px-4 text-blue-600 text-center">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // Para modal, usar URL otimizada para melhor UX
+                            abrirModalVideo({
+                              id: Number(video.id),
+                              nome: video.nome,
+                              url: `/api/videos-ssh/stream/${video.id}`,
+                              duracao: video.duration,
+                              tamanho: video.size
+                            } as Video);
+                          }}
+                          title="Assistir vídeo no modal"
+                          className="hover:text-blue-800 transition-colors duration-200"
+                        >
+                          <Play size={16} />
+                        </button>
+                      </td>
+                      <td className="py-2 px-2 sm:px-4 text-center">
+                        <div className="flex items-center justify-center space-x-1 flex-wrap">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              // Para nova aba, usar URL direta para melhor performance
+                              openVideoInNewTab(video);
+                            }}
+                            title="Abrir vídeo em nova aba (URL direta)"
+                            className="text-green-600 hover:text-green-800 transition-colors duration-200"
+                          >
+                            <Eye size={12} />
+                          </button>
+                          
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              checkVideoIntegrity(video);
+                            }}
+                            title="Verificar integridade do vídeo"
+                            className="text-purple-600 hover:text-purple-800 transition-colors duration-200"
+                          >
+                            <Activity size={12} />
+                          </button>
+                          
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startEditingVideo(video);
+                            }}
+                            title="Editar nome do vídeo"
+                            className="text-blue-600 hover:text-blue-800 transition-colors duration-200"
+                            disabled={editingVideo?.id === video.id}
+                          >
+                            <Edit2 size={12} />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              confirmarDeletarSSHVideo(video);
+                            }}
+                            title="Excluir vídeo do servidor"
+                            className="text-red-600 hover:text-red-800 transition-colors duration-200"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      {/* Modal de vídeo com controles integrados */}
+      <ModalVideo
+        aberto={modalAberta}
+        onFechar={() => setModalAberta(false)}
+        videoAtual={videoModalAtual}
+        playlist={playlistModal ?? undefined}
+      />
+
+      {/* Modal de confirmação */}
+      <ModalConfirmacao
+        aberto={modalConfirmacao.aberto}
+        onFechar={() => setModalConfirmacao(prev => ({ ...prev, aberto: false }))}
+        onConfirmar={executarDelecao}
+        titulo={modalConfirmacao.titulo}
+        mensagem={modalConfirmacao.mensagem}
+      'INSERT INTO playlists (nome, codigo_stm, data_criacao, total_videos, duracao_total) VALUES (?, ?, NOW(), 0, 0)',
+      />
+    </>
+    return {
+    console.log(`📁 Playlist criada para pasta SSH: ${playlistName} (ID: ${result.insertId})`);
+      skipped: 0,
+      total: sshVideos.length,
+      error: error.message
+    };
+  );
 }
-
-// Função para obter ou criar playlist padrão para vídeos SSH
-async function getOrCreateSSHPlaylist(userId, folderName) {
-  try {
-    const playlistName = `SSH - ${folderName}`;
-    
-    // Verificar se playlist já existe
-    const [existingPlaylist] = await db.execute(
-      'SELECT id FROM playlists WHERE nome = ? AND codigo_stm = ?',
-      [playlistName, userId]
-    );
-
-    if (existingPlaylist.length > 0) {
-      return existingPlaylist[0].id;
-    }
-
-    // Criar nova playlist
-    const [result] = await db.execute(
-      'INSERT INTO playlists (nome, codigo_stm, data_criacao) VALUES (?, ?, NOW())',
-      [playlistName, userId]
-    );
-
-    console.log(`📁 Playlist SSH criada: ${playlistName} (ID: ${result.insertId})`);
-    return result.insertId;
-  } catch (error) {
-    console.error('Erro ao criar playlist SSH:', error);
-    return 1; // Fallback para playlist padrão
-  }
-}
-
-module.exports = router;

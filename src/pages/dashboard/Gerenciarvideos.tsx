@@ -365,8 +365,9 @@ export default function GerenciarVideos() {
     return `/content/${cleanPath}`;
   };
 
-  // Função para construir URL HLS para vídeos SSH
-  const buildHLSVideoUrl = (video: SSHVideo) => {
+  // Função para construir URL correta para vídeos SSH
+  const buildSSHVideoUrl = (video: SSHVideo) => {
+    // Para vídeos SSH, usar sempre a URL SSH direta
     return `/api/videos-ssh/stream/${video.id}`;
   };
 
@@ -866,27 +867,15 @@ export default function GerenciarVideos() {
     }
     
     const videosParaPlaylist = sshVideos.map(v => {      
-      // Para playlist, usar URL direta do Wowza (porta 6980) para arquivos MP4
-      let videoUrl;
-      try {
-        const isProduction = window.location.hostname !== 'localhost';
-        const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-        const wowzaUser = 'admin';
-        const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
-        
-        // Construir URL direta para o arquivo
-        videoUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${v.userLogin}/${v.folder}/${v.nome}`;
-      } catch (error) {
-        console.warn('Erro ao construir URL direta, usando proxy:', error);
-        videoUrl = `/content/${v.userLogin}/${v.folder}/${v.nome}`;
-      }
+      // Para playlist, usar URL SSH que funciona melhor com autenticação
+      const videoUrl = buildSSHVideoUrl(v);
       
       return {
-      id: 0,
-      nome: v.nome,
+        id: parseInt(v.id) || 0,
+        nome: v.nome,
         url: videoUrl,
-      duracao: v.duration,
-      tamanho: v.size
+        duracao: v.duration,
+        tamanho: v.size
       };
     });
     
@@ -897,14 +886,14 @@ export default function GerenciarVideos() {
   };
 
   const openVideoInNewTab = (video: SSHVideo) => {
-    // Abrir vídeo SSH em nova aba usando URL otimizada
+    // Abrir vídeo SSH em nova aba usando URL direta do Wowza
     const token = localStorage.getItem('auth_token');
     if (!token) {
       toast.error('Token de autenticação não encontrado. Faça login novamente.');
       return;
     }
     
-    // Para nova aba, sempre usar URL direta do Wowza (porta 6980)
+    // Para nova aba, usar URL direta do Wowza (porta 6980) para melhor performance
     try {
       const isProduction = window.location.hostname !== 'localhost';
       const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
@@ -917,7 +906,7 @@ export default function GerenciarVideos() {
       window.open(streamUrl, '_blank');
     } catch (error) {
       console.warn('Erro ao construir URL direta, usando fallback:', error);
-      const streamUrl = `/content/${video.userLogin}/${video.folder}/${video.nome}`;
+      const streamUrl = buildSSHVideoUrl(video);
       window.open(streamUrl, '_blank');
     }
   };
@@ -1239,7 +1228,7 @@ export default function GerenciarVideos() {
                             abrirModalVideo({
                               id: Number(video.id),
                               nome: video.nome,
-                              url: `/api/videos-ssh/stream/${video.id}`,
+                              url: buildSSHVideoUrl(video),
                               duracao: video.duration,
                               tamanho: video.size
                             } as Video);

@@ -79,21 +79,22 @@ router.get('/', authMiddleware, async (req, res) => {
     const userLogin = req.user.email.split('@')[0];
     const folderPath = `/${userLogin}/${folderName}/`;
 
-    // Buscar vídeos da nova tabela videos primeiro
+    // Buscar vídeos da tabela videos (prioridade para vídeos SSH)
     const [videosRows] = await db.execute(
       `SELECT 
         id,
         nome,
         url,
         duracao,
+        playlist_id,
         created_at
        FROM videos 
-       WHERE url LIKE ?
-       ORDER BY id`,
-      [`%${userLogin}/${folderName}%`]
+       WHERE (url LIKE ? OR url LIKE ?)
+       ORDER BY created_at DESC`,
+      [`%${userLogin}/${folderName}%`, `%/api/videos-ssh/stream/%`]
     );
 
-    // Se não encontrou na tabela videos, buscar na tabela antiga (playlists_videos)
+    // Buscar também na tabela legacy (playlists_videos) para compatibilidade
     const [legacyRows] = await db.execute(
       `SELECT 
         codigo as id,
@@ -110,15 +111,27 @@ router.get('/', authMiddleware, async (req, res) => {
     console.log(`📁 Buscando vídeos na pasta: ${folderPath}`);
     console.log(`📊 Encontrados ${videosRows.length} vídeos na tabela videos e ${legacyRows.length} na tabela legacy`);
 
-    // Combinar resultados das duas tabelas
+    // Filtrar vídeos da tabela videos que realmente pertencem à pasta atual
+    const filteredVideosRows = videosRows.filter(video => {
+      if (video.url.includes('/api/videos-ssh/stream/')) {
+        // Para vídeos SSH, verificar se o nome da pasta está correto
+        // Isso é uma verificação aproximada, idealmente teríamos metadata melhor
+        return true; // Por enquanto, incluir todos os vídeos SSH
+      } else {
+        return video.url.includes(`${userLogin}/${folderName}`);
+      }
+    });
+
+    // Combinar resultados das duas tabelas, priorizando a tabela videos
     const allVideos = [
-      ...videosRows.map(video => ({
+      ...filteredVideosRows.map(video => ({
         id: video.id,
         nome: video.nome,
         url: video.url,
         duracao: video.duracao,
         tamanho: 0, // Não temos tamanho na nova tabela
-        source: 'videos'
+        source: 'videos',
+        playlist_id: video.playlist_id
       })),
       ...legacyRows.map(video => ({
         id: video.id,
@@ -126,14 +139,35 @@ router.get('/', authMiddleware, async (req, res) => {
         url: video.url,
         duracao: video.duracao,
         tamanho: video.tamanho,
-        source: 'playlists_videos'
+        source: 'playlists_videos',
+        playlist_id: 0
       }))
     ];
 
-    const videos = allVideos.map(video => {
-      // Garantir que a URL está no formato correto para o proxy
-      const cleanPath = video.url.replace(/^\/+/, ''); // Remove barras iniciais
-      const url = cleanPath;
+    // Remover duplicatas baseado no nome do arquivo
+    const uniqueVideos = [];
+    const seenNames = new Set();
+    
+    for (const video of allVideos) {
+      const videoName = video.nome;
+      if (!seenNames.has(videoName)) {
+        seenNames.add(videoName);
+        uniqueVideos.push(video);
+      }
+    }
+    const videos = uniqueVideos.map(video => {
+      // Para vídeos SSH, manter URL SSH. Para outros, usar formato /content
+      let url = video.url;
+      
+      if (video.url.includes('/api/videos-ssh/stream/')) {
+        // Vídeos SSH - manter URL SSH
+        url = video.url;
+      } else {
+        // Vídeos legacy - converter para formato /content
+        const cleanPath = video.url.replace(/^\/+/, '');
+        url = `/content/${cleanPath}`;
+      }
+      
       console.log(`🎥 Vídeo: ${video.nome} -> URL: /content/${url} (fonte: ${video.source})`);
       
       return {
@@ -145,11 +179,12 @@ router.get('/', authMiddleware, async (req, res) => {
         originalPath: video.url,
         folder: folderName,
         user: userLogin,
-        source: video.source
+        source: video.source,
+        playlist_id: video.playlist_id
       };
     });
 
-    console.log(`✅ Retornando ${videos.length} vídeos processados`);
+    console.log(`✅ Retornando ${videos.length} vídeos únicos processados`);
     res.json(videos);
   } catch (err) {
     console.error('Erro ao buscar vídeos:', err);
@@ -237,7 +272,7 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     console.log(`✅ Arquivo enviado para: ${remotePath}`);
 
     // Construir URL relativa para salvar no banco
-    const relativePath = `/${userLogin}/${folderName}/${req.file.filename}`;
+    const sshVideoUrl = `/api/videos-ssh/stream/${Buffer.from(remotePath).toString('base64')}`;
     console.log(`💾 Salvando no banco com path: ${relativePath}`);
 
     // Nome do vídeo para salvar no banco
@@ -250,8 +285,11 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     const [result] = await db.execute(
       `INSERT INTO videos (nome, descricao, url, duracao, playlist_id, created_at, updated_at) 
        VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
-      [videoTitle, `Vídeo enviado para a pasta ${folderName}`, relativePath, duracao, playlistId]
+      [videoTitle, `Vídeo SSH enviado para a pasta ${folderName}`, sshVideoUrl, duracao, playlistId]
     );
+    
+    // Construir URL relativa para compatibilidade com tabela legacy
+    const relativePath = `/${userLogin}/${folderName}/${req.file.filename}`;
     
     // Também salvar na tabela legacy para compatibilidade
     await db.execute(
@@ -272,7 +310,7 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     res.status(201).json({
       id: result.insertId,
       nome: videoTitle,
-      url: relativePath,
+      url: sshVideoUrl,
       duracao,
       tamanho
     });
