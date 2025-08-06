@@ -90,6 +90,10 @@ class VideoSSHManager {
                     console.warn(`Não foi possível obter duração de ${fileName}`);
                 }
 
+                // Construir URL HLS para o vídeo
+                const isProduction = process.env.NODE_ENV === 'production';
+                const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+                const hlsUrl = `http://${wowzaHost}:1935/vod/${userLogin}/${folderPath === '.' ? '' : folderPath + '/'}${fileName}/playlist.m3u8`;
                 videos.push({
                     id: Buffer.from(fullPath).toString('base64'), // ID único baseado no caminho
                     nome: fileName,
@@ -101,11 +105,17 @@ class VideoSSHManager {
                     permissions: permissions,
                     lastModified: new Date().toISOString(), // Seria melhor extrair do ls
                     serverId: serverId,
-                    userLogin: userLogin
+                    userLogin: userLogin,
+                    hlsUrl: hlsUrl,
+                    vodUrl: `http://${wowzaHost}:6980/content/${userLogin}/${folderPath === '.' ? '' : folderPath + '/'}${fileName}`
                 });
             }
 
             console.log(`📹 Encontrados ${videos.length} vídeos no servidor para ${userLogin}`);
+            
+            // Sincronizar com banco de dados
+            await this.syncVideosWithDatabase(videos, userLogin, serverId);
+            
             return videos;
             
         } catch (error) {
@@ -114,6 +124,104 @@ class VideoSSHManager {
         }
     }
 
+    async syncVideosWithDatabase(videos, userLogin, serverId) {
+        try {
+            const db = require('./database');
+            
+            console.log(`🔄 Sincronizando ${videos.length} vídeos com banco de dados...`);
+            
+            for (const video of videos) {
+                try {
+                    // Verificar se vídeo já existe no banco
+                    const [existingRows] = await db.execute(
+                        'SELECT codigo FROM playlists_videos WHERE path_video = ?',
+                        [video.fullPath]
+                    );
+                    
+                    if (existingRows.length === 0) {
+                        // Inserir novo vídeo no banco
+                        const duracao = this.formatDuration(video.duration);
+                        
+                        await db.execute(
+                            `INSERT INTO playlists_videos (
+                                codigo_playlist, path_video, video, width, height,
+                                bitrate, duracao, duracao_segundos, tipo, ordem, tamanho_arquivo
+                            ) VALUES (0, ?, ?, 1920, 1080, 2500, ?, ?, 'video', 0, ?)`,
+                            [
+                                video.fullPath,
+                                video.nome,
+                                duracao,
+                                video.duration,
+                                video.size
+                            ]
+                        );
+                        
+                        console.log(`✅ Vídeo sincronizado no banco: ${video.nome}`);
+                    } else {
+                        // Atualizar informações se necessário
+                        await db.execute(
+                            'UPDATE playlists_videos SET tamanho_arquivo = ?, duracao_segundos = ? WHERE path_video = ?',
+                            [video.size, video.duration, video.fullPath]
+                        );
+                    }
+                } catch (videoError) {
+                    console.warn(`Erro ao sincronizar vídeo ${video.nome}:`, videoError.message);
+                }
+            }
+            
+            // Recalcular espaço usado por pasta
+            await this.recalculateFolderSpace(userLogin);
+            
+        } catch (error) {
+            console.error('Erro na sincronização com banco:', error);
+        }
+    }
+
+    async recalculateFolderSpace(userLogin) {
+        try {
+            const db = require('./database');
+            
+            // Buscar todas as pastas do usuário
+            const [folderRows] = await db.execute(
+                'SELECT codigo, identificacao FROM streamings WHERE login = ? OR email LIKE ?',
+                [userLogin, `${userLogin}@%`]
+            );
+            
+            for (const folder of folderRows) {
+                // Calcular espaço usado baseado nos vídeos no banco
+                const [spaceRows] = await db.execute(
+                    `SELECT COALESCE(SUM(CEIL(tamanho_arquivo / (1024 * 1024))), 0) as used_mb
+                     FROM playlists_videos 
+                     WHERE path_video LIKE ?`,
+                    [`%/${userLogin}/${folder.identificacao}/%`]
+                );
+                
+                const usedMB = spaceRows[0]?.used_mb || 0;
+                
+                // Atualizar espaço usado na pasta
+                await db.execute(
+                    'UPDATE streamings SET espaco_usado = ? WHERE codigo = ?',
+                    [usedMB, folder.codigo]
+                );
+                
+                console.log(`📊 Espaço recalculado para pasta ${folder.identificacao}: ${usedMB}MB`);
+            }
+            
+        } catch (error) {
+            console.error('Erro ao recalcular espaço das pastas:', error);
+        }
+    }
+
+    formatDuration(seconds) {
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.floor(seconds % 60);
+        
+        if (h > 0) {
+            return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        }
+        return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
     async downloadVideoToTemp(serverId, remotePath, videoId) {
         try {
             // Verificar se já está sendo baixado

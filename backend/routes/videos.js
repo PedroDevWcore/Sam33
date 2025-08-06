@@ -207,12 +207,17 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     // Nome do vídeo para salvar no banco
     const videoTitle = req.file.originalname;
 
+    // Construir URLs do Wowza para o vídeo
+    const isProduction = process.env.NODE_ENV === 'production';
+    const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+    const hlsUrl = `http://${wowzaHost}:1935/vod${relativePath}/playlist.m3u8`;
+    const vodUrl = `http://${wowzaHost}:6980/content${relativePath}`;
     const [result] = await db.execute(
       `INSERT INTO playlists_videos (
-        codigo_playlist, path_video, video, width, height, 
+        codigo_playlist, path_video, video, width, height,
         bitrate, duracao, duracao_segundos, tipo, ordem, tamanho_arquivo
       ) VALUES (0, ?, ?, 1920, 1080, 2500, ?, ?, 'video', 0, ?)`,
-      [relativePath, videoTitle, formatDuration(duracao), duracao, tamanho]
+      [remotePath, videoTitle, formatDuration(duracao), duracao, tamanho]
     );
 
     await db.execute(
@@ -225,7 +230,9 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     res.status(201).json({
       id: result.insertId,
       nome: videoTitle,
-      url: relativePath,
+      url: hlsUrl,
+      vodUrl: vodUrl,
+      path: remotePath,
       duracao,
       tamanho
     });

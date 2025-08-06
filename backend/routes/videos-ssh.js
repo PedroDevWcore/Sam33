@@ -522,23 +522,63 @@ router.delete('/:videoId', authMiddleware, async (req, res) => {
 
     const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
 
+    // Obter tamanho do arquivo antes de deletar
+    let fileSize = 0;
+    try {
+      const fileInfo = await SSHManager.getFileInfo(serverId, remotePath);
+      fileSize = fileInfo.exists ? fileInfo.size : 0;
+    } catch (sizeError) {
+      console.warn('Erro ao obter tamanho do arquivo:', sizeError.message);
+    }
     // Remover vídeo do servidor
     const result = await VideoSSHManager.deleteVideoFromServer(serverId, remotePath);
 
     if (result.success) {
-      // Também remover do banco de dados se existir
+      // Remover do banco de dados se existir
       try {
-        await db.execute(
-          'DELETE FROM playlists_videos WHERE path_video LIKE ?',
-          [`%${path.basename(remotePath)}`]
+        // Buscar vídeo no banco para obter tamanho exato
+        const [videoRows] = await db.execute(
+          'SELECT tamanho_arquivo FROM playlists_videos WHERE path_video = ?',
+          [remotePath]
         );
+        
+        if (videoRows.length > 0 && videoRows[0].tamanho_arquivo) {
+          fileSize = videoRows[0].tamanho_arquivo;
+        }
+        
+        await db.execute(
+          'DELETE FROM playlists_videos WHERE path_video = ?',
+          [remotePath]
+        );
+        
+        console.log(`✅ Vídeo removido do banco: ${remotePath}`);
       } catch (dbError) {
         console.warn('Aviso: Erro ao remover do banco:', dbError.message);
       }
 
+      // Atualizar espaço usado na pasta correspondente
+      if (fileSize > 0) {
+        const spaceMB = Math.ceil(fileSize / (1024 * 1024));
+        
+        // Extrair nome da pasta do caminho
+        const pathParts = remotePath.split('/');
+        const folderName = pathParts[pathParts.length - 2]; // Pasta antes do arquivo
+        
+        try {
+          await db.execute(
+            'UPDATE streamings SET espaco_usado = GREATEST(espaco_usado - ?, 0) WHERE codigo_cliente = ? AND identificacao = ?',
+            [spaceMB, userId, folderName]
+          );
+          
+          console.log(`📊 Espaço liberado: ${spaceMB}MB na pasta ${folderName}`);
+        } catch (updateError) {
+          console.warn('Erro ao atualizar espaço usado:', updateError.message);
+        }
+      }
       res.json({
         success: true,
-        message: 'Vídeo removido com sucesso do servidor'
+        message: 'Vídeo removido com sucesso do servidor',
+        spaceMB: fileSize > 0 ? Math.ceil(fileSize / (1024 * 1024)) : 0
       });
     } else {
       throw new Error('Falha ao remover vídeo do servidor');
@@ -548,6 +588,96 @@ router.delete('/:videoId', authMiddleware, async (req, res) => {
     res.status(500).json({ 
       success: false, 
       error: 'Erro ao remover vídeo do servidor',
+      details: error.message 
+    });
+  }
+});
+// POST /api/videos-ssh/sync-database - Sincronizar vídeos SSH com banco
+router.post('/sync-database', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
+    const { folderId } = req.body;
+
+    if (!folderId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'ID da pasta é obrigatório' 
+      });
+    }
+
+    // Buscar dados da pasta
+    const [folderRows] = await db.execute(
+      'SELECT identificacao, codigo_servidor FROM streamings WHERE codigo = ? AND codigo_cliente = ?',
+      [folderId, userId]
+    );
+
+    if (folderRows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Pasta não encontrada' 
+      });
+    }
+
+    const folder = folderRows[0];
+    const serverId = folder.codigo_servidor || 1;
+    const folderName = folder.identificacao;
+
+    // Listar vídeos do servidor
+    const videos = await VideoSSHManager.listVideosFromServer(serverId, userLogin, folderName);
+
+    // Limpar vídeos antigos desta pasta do banco
+    await db.execute(
+      'DELETE FROM playlists_videos WHERE path_video LIKE ?',
+      [`%/${userLogin}/${folderName}/%`]
+    );
+
+    // Inserir vídeos atualizados no banco
+    let totalSize = 0;
+    for (const video of videos) {
+      try {
+        const duracao = VideoSSHManager.formatDuration(video.duration);
+        
+        await db.execute(
+          `INSERT INTO playlists_videos (
+            codigo_playlist, path_video, video, width, height,
+            bitrate, duracao, duracao_segundos, tipo, ordem, tamanho_arquivo
+          ) VALUES (0, ?, ?, 1920, 1080, 2500, ?, ?, 'video', 0, ?)`,
+          [
+            video.fullPath,
+            video.nome,
+            duracao,
+            video.duration,
+            video.size
+          ]
+        );
+        
+        totalSize += video.size;
+      } catch (videoError) {
+        console.warn(`Erro ao inserir vídeo ${video.nome}:`, videoError.message);
+      }
+    }
+
+    // Atualizar espaço usado da pasta
+    const totalMB = Math.ceil(totalSize / (1024 * 1024));
+    await db.execute(
+      'UPDATE streamings SET espaco_usado = ? WHERE codigo = ?',
+      [totalMB, folderId]
+    );
+
+    console.log(`🔄 Sincronização concluída: ${videos.length} vídeos, ${totalMB}MB`);
+
+    res.json({
+      success: true,
+      message: `Sincronização concluída: ${videos.length} vídeos processados`,
+      videos_count: videos.length,
+      total_size_mb: totalMB
+    });
+  } catch (error) {
+    console.error('Erro na sincronização:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Erro na sincronização com banco de dados',
       details: error.message 
     });
   }

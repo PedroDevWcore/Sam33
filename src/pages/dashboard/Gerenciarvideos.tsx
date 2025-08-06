@@ -346,6 +346,8 @@ export default function GerenciarVideos() {
   const [uploadError, setUploadError] = useState<string>('');
   const [spaceWarning, setSpaceWarning] = useState<string>('');
 
+  // Estado para sincronização
+  const [syncing, setSyncing] = useState(false);
   // Estados para confirmação
   const [modalConfirmacao, setModalConfirmacao] = useState({
     aberto: false,
@@ -365,9 +367,18 @@ export default function GerenciarVideos() {
     return `/content/${cleanPath}`;
   };
 
+  // Função para construir URL HLS otimizada
+  const buildHLSUrl = (video: SSHVideo) => {
+    const isProduction = window.location.hostname !== 'localhost';
+    const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+    
+    // Construir URL HLS para melhor performance
+    return `http://${wowzaHost}:1935/vod/${video.userLogin}/${video.folder}/${video.nome}/playlist.m3u8`;
+  };
   // Função para construir URL HLS para vídeos SSH
   const buildHLSVideoUrl = (video: SSHVideo) => {
-    return `/api/videos-ssh/stream/${video.id}`;
+    // Usar URL HLS direta para melhor performance
+    return buildHLSUrl(video);
   };
 
   useEffect(() => {
@@ -484,28 +495,54 @@ export default function GerenciarVideos() {
   const syncFolderWithServer = async () => {
     if (!folderSelecionada) return;
     
-    if (!confirm('Deseja sincronizar esta pasta com o servidor? Isso pode levar alguns minutos.')) {
+    if (!confirm('Deseja sincronizar esta pasta com o servidor e banco de dados? Isso pode levar alguns minutos.')) {
       return;
     }
     
+    setSyncing(true);
     try {
       const token = await getToken();
-      const response = await fetch(`/api/videos-ssh/folders/${folderSelecionada.id}/sync`, {
+      
+      // Primeiro, sincronizar com servidor
+      const serverSyncResponse = await fetch(`/api/videos-ssh/folders/${folderSelecionada.id}/sync`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
       
-      const data = await response.json();
-      if (data.success) {
-        toast.success(data.message);
+      const serverSyncData = await serverSyncResponse.json();
+      if (!serverSyncData.success) {
+        throw new Error(serverSyncData.error);
+      }
+      
+      // Depois, sincronizar com banco de dados
+      const dbSyncResponse = await fetch('/api/videos-ssh/sync-database', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          folderId: folderSelecionada.id
+        })
+      });
+      
+      const dbSyncData = await dbSyncResponse.json();
+      if (dbSyncData.success) {
+        toast.success(`Sincronização completa: ${dbSyncData.videos_count} vídeos, ${dbSyncData.total_size_mb}MB`);
         fetchSSHVideos(folderSelecionada.nome);
         loadFolderUsage(folderSelecionada.id);
+        // Recarregar lista de vídeos para refletir mudanças
+        setTimeout(() => {
+          fetchSSHVideos(folderSelecionada.nome);
+        }, 1000);
       } else {
-        toast.error(data.error);
+        toast.error(dbSyncData.error);
       }
     } catch (error) {
       console.error('Erro na sincronização:', error);
       toast.error('Erro na sincronização com servidor');
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -823,25 +860,43 @@ export default function GerenciarVideos() {
       return;
     }
     
-    // Para vídeos SSH, usar URL direta do Wowza para melhor performance
+    // Para vídeos SSH, usar URL HLS para melhor performance e evitar travamentos
     let videoUrl = video.url || '';
     if (videoUrl.includes('/api/videos-ssh/')) {
       const videoId = videoUrl.split('/stream/')[1]?.split('?')[0];
       if (videoId) {
         try {
-          // Construir URL direta do Wowza para melhor performance
+          // Construir URL HLS do Wowza para melhor performance
           const remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
           const isProduction = window.location.hostname !== 'localhost';
           const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-          const wowzaUser = 'admin';
-          const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
           
-          const relativePath = remotePath.replace('/usr/local/WowzaStreamingEngine/content', '');
-          videoUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content${relativePath}`;
+          // Extrair informações do caminho
+          const pathParts = remotePath.split('/');
+          const userLogin = pathParts[pathParts.length - 3];
+          const folderName = pathParts[pathParts.length - 2];
+          const fileName = pathParts[pathParts.length - 1];
+          
+          // URL HLS para streaming fluido
+          videoUrl = `http://${wowzaHost}:1935/vod/${userLogin}/${folderName}/${fileName}/playlist.m3u8`;
         } catch (error) {
-          console.warn('Erro ao construir URL direta, usando otimizada:', error);
+          console.warn('Erro ao construir URL HLS, usando otimizada:', error);
           videoUrl = buildOptimizedSSHUrl(videoId);
         }
+      }
+    } else if (!videoUrl.startsWith('http')) {
+      // Para outros vídeos, tentar construir URL HLS também
+      const cleanPath = videoUrl.replace(/^\/+/, '');
+      const pathParts = cleanPath.split('/');
+      
+      if (pathParts.length >= 3) {
+        const userLogin = pathParts[0];
+        const folderName = pathParts[1];
+        const fileName = pathParts[2];
+        
+        const isProduction = window.location.hostname !== 'localhost';
+        const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+        videoUrl = `http://${wowzaHost}:1935/vod/${userLogin}/${folderName}/${fileName}/playlist.m3u8`;
       }
     }
     
@@ -866,20 +921,16 @@ export default function GerenciarVideos() {
     }
     
     const videosParaPlaylist = sshVideos.map(v => {      
-      // Construir URL direta do Wowza para playlist (melhor performance)
+      // Construir URL HLS do Wowza para playlist (melhor performance e sem travamentos)
       let videoUrl;
       try {
-        const remotePath = Buffer.from(v.id, 'base64').toString('utf-8');
         const isProduction = window.location.hostname !== 'localhost';
         const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-        const wowzaUser = 'admin';
-        const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
         
-        // URL direta do Wowza para reprodução fluida
-        const relativePath = remotePath.replace('/usr/local/WowzaStreamingEngine/content', '');
-        videoUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content${relativePath}`;
+        // URL HLS para reprodução fluida sem travamentos
+        videoUrl = `http://${wowzaHost}:1935/vod/${v.userLogin}/${v.folder}/${v.nome}/playlist.m3u8`;
       } catch (error) {
-        console.warn('Erro ao construir URL direta, usando proxy:', error);
+        console.warn('Erro ao construir URL HLS, usando proxy:', error);
         videoUrl = `/content/${v.userLogin}/${v.folder}/${v.nome}`;
       }
       
@@ -906,17 +957,13 @@ export default function GerenciarVideos() {
       return;
     }
     
-    // Para nova aba, usar URL direta do Wowza para melhor performance
+    // Para nova aba, usar URL HLS do Wowza para melhor performance
     try {
-      const remotePath = Buffer.from(video.id, 'base64').toString('utf-8');
       const isProduction = window.location.hostname !== 'localhost';
       const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-      const wowzaUser = 'admin';
-      const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
       
-      // URL direta do Wowza para melhor performance em nova aba
-      const relativePath = remotePath.replace('/usr/local/WowzaStreamingEngine/content', '');
-      const streamUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content${relativePath}`;
+      // URL HLS para melhor performance em nova aba (sem travamentos)
+      const streamUrl = `http://${wowzaHost}:1935/vod/${video.userLogin}/${video.folder}/${video.nome}/playlist.m3u8`;
       
       window.open(streamUrl, '_blank');
     } catch (error) {
@@ -1054,10 +1101,26 @@ export default function GerenciarVideos() {
               {folderSelecionada && (
                 <button
                   onClick={syncFolderWithServer}
+                  disabled={syncing}
                   className="flex items-center space-x-1 text-green-600 hover:text-green-800 text-sm px-2 py-1 rounded border border-green-300 hover:bg-green-50"
                 >
-                  <Download className="h-3 w-3" />
-                  <span className="hidden sm:inline">Sync</span>
+                  <Download className={`h-3 w-3 ${syncing ? 'animate-spin' : ''}`} />
+                  <span className="hidden sm:inline">{syncing ? 'Sincronizando...' : 'Sync DB'}</span>
+                </button>
+              )}
+              
+              {folderSelecionada && (
+                <button
+                  onClick={() => {
+                    if (confirm('Deseja recalcular o espaço usado desta pasta baseado nos vídeos atuais?')) {
+                      loadFolderUsage(folderSelecionada.id);
+                    }
+                  }}
+                  disabled={loadingUsage}
+                  className="flex items-center space-x-1 text-purple-600 hover:text-purple-800 text-sm px-2 py-1 rounded border border-purple-300 hover:bg-purple-50"
+                >
+                  <Activity className={`h-3 w-3 ${loadingUsage ? 'animate-spin' : ''}`} />
+                  <span className="hidden sm:inline">Recalc</span>
                 </button>
               )}
               
@@ -1243,7 +1306,7 @@ export default function GerenciarVideos() {
                             abrirModalVideo({
                               id: Number(video.id),
                               nome: video.nome,
-                              url: `/api/videos-ssh/stream/${video.id}`,
+                              url: buildHLSUrl(video), // Usar URL HLS direta
                               duracao: video.duration,
                               tamanho: video.size
                             } as Video);
