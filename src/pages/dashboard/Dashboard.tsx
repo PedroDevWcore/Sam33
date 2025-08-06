@@ -172,7 +172,7 @@ const Dashboard: React.FC = () => {
       if (response.ok) {
         const data = await response.json();
         if (data.success) {
-          setObsStatus(data.obs_stream);
+          videoUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
         }
       }
     } catch (error) {

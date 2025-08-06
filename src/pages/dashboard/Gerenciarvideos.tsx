@@ -669,7 +669,7 @@ const GerenciarVideos: React.FC = () => {
           }}
         >
           <div className={`bg-black rounded-lg relative ${
-            isFullscreen ? 'w-screen h-screen' : 'max-w-[95vw] max-h-[90vh] w-full'
+            isFullscreen ? 'w-screen h-screen' : 'max-w-4xl w-full h-[70vh]'
           }`}>
             {/* Controles do Modal */}
             <div className="absolute top-4 right-4 z-20 flex items-center space-x-2">
@@ -700,7 +700,7 @@ const GerenciarVideos: React.FC = () => {
             </div>
 
             {/* Player */}
-            <div className={`w-full h-full ${isFullscreen ? 'p-0' : 'p-8 pt-20'}`}>
+            <div className={`w-full h-full ${isFullscreen ? 'p-0' : 'p-4 pt-16'}`}>
               <UniversalVideoPlayer
                 src={buildVideoUrl(currentVideo.url)}
                 title={currentVideo.nome}

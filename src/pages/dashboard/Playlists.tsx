@@ -970,7 +970,7 @@ const Playlists: React.FC = () => {
           }}
         >
           <div className={`bg-black rounded-lg relative ${
-            isFullscreen ? 'w-screen h-screen' : 'max-w-[95vw] sm:max-w-[85vw] max-h-[90vh] sm:max-h-[80vh] w-full'
+            isFullscreen ? 'w-screen h-screen' : 'max-w-4xl w-full h-[70vh]'
           }`}>
             {/* Controles do Modal */}
             <div className="absolute top-4 right-4 z-20 flex items-center space-x-2">
@@ -1002,7 +1002,7 @@ const Playlists: React.FC = () => {
             </div>
 
             {/* Player Universal */}
-            <div className={`w-full h-full ${isFullscreen ? 'p-0' : 'p-8 pt-20'}`}>
+            <div className={`w-full h-full ${isFullscreen ? 'p-0' : 'p-4 pt-16'}`}>
               <UniversalVideoPlayer
                 src={currentVideoUrl}
                 title={playlistVideosToPlay[playlistPlayerIndex]?.nome || 'Vídeo'}

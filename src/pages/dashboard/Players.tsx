@@ -538,7 +538,7 @@ player.play();`,
           }}
         >
           <div className={`bg-black rounded-lg relative ${
-            isFullscreen ? 'w-screen h-screen' : 'max-w-[85vw] max-h-[80vh] w-full'
+            isFullscreen ? 'w-screen h-screen' : 'max-w-4xl w-full h-[70vh]'
           }`}>
             {/* Controles do Modal */}
             <div className="absolute top-4 right-4 z-20 flex items-center space-x-2">
@@ -566,7 +566,7 @@ player.play();`,
             </div>
 
             {/* Player */}
-            <div className={`w-full h-full ${isFullscreen ? 'p-0' : 'p-8 pt-20'}`}>
+            <div className={`w-full h-full ${isFullscreen ? 'p-0' : 'p-4 pt-16'}`}>
               <UniversalVideoPlayer
                 src={previewVideo ? getVideoUrl(previewVideo.url) : undefined}
                 title={previewVideo?.nome}
