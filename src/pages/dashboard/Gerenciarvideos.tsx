@@ -1155,6 +1155,11 @@ export default function GerenciarVideos() {
                       (atualizado: {new Date(folderUsage.last_updated).toLocaleTimeString()})
                     </span>
                   )}
+                  {folderUsage.database_used !== folderUsage.real_used && (
+                    <span className="text-orange-600 text-xs ml-2">
+                      (BD: {formatarTamanho(folderUsage.database_used * 1024 * 1024)} | Real: {formatarTamanho(folderUsage.real_used * 1024 * 1024)})
+                    </span>
+                  )}
                 </div>
                 <div className="text-right">
                   <span className={`font-medium ${
@@ -1180,6 +1185,11 @@ export default function GerenciarVideos() {
               {folderUsage.percentage > 95 && (
                 <div className="text-xs text-red-600 font-medium">
                   🚨 Espaço crítico! Exclua vídeos para continuar enviando arquivos.
+                </div>
+              )}
+              {Math.abs(folderUsage.database_used - folderUsage.real_used) > 5 && (
+                <div className="text-xs text-orange-600 font-medium">
+                  ⚠️ Diferença detectada entre banco e servidor. Use "Sync DB" para corrigir.
                 </div>
               )}
             </div>
