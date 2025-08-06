@@ -437,8 +437,15 @@ const UniversalVideoPlayer: React.FC<UniversalVideoPlayerProps> = ({
       // Vídeo regular (MP4, WebM, etc.)
       console.log(`📹 Carregando vídeo ${fileType.toUpperCase()}${src.includes('/api/videos-ssh/') ? ' (SSH Otimizado)' : ''}`);
 
+          
+          // Adicionar token de autenticação se não estiver presente
+          let videoUrl = buildVideoUrl(src);
+          const token = localStorage.getItem('auth_token');
+          if (token && !videoUrl.includes('token=')) {
+            videoUrl = `${videoUrl}${videoUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+          }
       // Para vídeos SSH, configurar timeout maior
-      if (src && src.includes('/api/videos-ssh/')) {
+          video.src = videoUrl;
         video.setAttribute('preload', 'metadata'); // Carregar metadados para melhor UX
         video.setAttribute('crossorigin', 'anonymous');
         
