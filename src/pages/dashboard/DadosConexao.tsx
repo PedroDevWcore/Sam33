@@ -42,12 +42,9 @@ interface UserLimits {
 }
 
 interface ServerInfo {
-  id: number;
-  nome: string;
-  limite_streamings: number;
-  streamings_ativas: number;
-  load_cpu: number;
-  tipo_servidor: string;
+  server_id: string;
+  server_url: string;
+  status: string;
 }
 
 const DadosConexao: React.FC = () => {
@@ -60,6 +57,8 @@ const DadosConexao: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [bitrateWarning, setBitrateWarning] = useState<string>('');
+  const [customBitrate, setCustomBitrate] = useState<number | null>(null);
+  const [showBitrateConfig, setShowBitrateConfig] = useState(false);
   
   const userLogin = user?.email?.split('@')[0] || `user_${user?.id || 'usuario'}`;
   
@@ -75,7 +74,11 @@ const DadosConexao: React.FC = () => {
   const loadOBSConfig = async () => {
     try {
       const token = await getToken();
-      const response = await fetch('/api/streaming/obs-config', {
+      const url = customBitrate ? 
+        `/api/streaming/obs-config?bitrate=${customBitrate}` : 
+        '/api/streaming/obs-config';
+        
+      const response = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` }
       });
       
@@ -153,6 +156,26 @@ const DadosConexao: React.FC = () => {
     }
   };
 
+  const handleBitrateChange = (newBitrate: number) => {
+    const maxBitrate = userLimits?.bitrate.max || 2500;
+    
+    if (newBitrate > maxBitrate) {
+      setBitrateWarning(`Bitrate solicitado (${newBitrate} kbps) excede o limite do seu plano (${maxBitrate} kbps). Será limitado para ${maxBitrate} kbps.`);
+    } else {
+      setBitrateWarning('');
+    }
+    
+    setCustomBitrate(newBitrate);
+  };
+
+  const applyBitrateConfig = async () => {
+    if (customBitrate) {
+      await loadOBSConfig();
+      setShowBitrateConfig(false);
+      toast.success('Configuração de bitrate aplicada!');
+    }
+  };
+
   // Dados de conexão para OBS/Streamlabs (sem expor dados do Wowza)
   const connectionData = {
     serverUrl: 'streaming.exemplo.com',
@@ -211,13 +234,6 @@ const DadosConexao: React.FC = () => {
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6">
           <h3 className="text-yellow-900 font-medium mb-3">⚠️ Informações Importantes</h3>
           
-          {bitrateWarning && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md">
-              <h4 className="text-red-800 font-medium mb-2">🚫 Aviso de Bitrate</h4>
-              <p className="text-red-700 text-sm">{bitrateWarning}</p>
-            </div>
-          )}
-          
           {warnings.length > 0 && (
             <div className="mb-4">
               <h4 className="text-yellow-800 font-medium mb-2">Avisos:</h4>
@@ -234,7 +250,6 @@ const DadosConexao: React.FC = () => {
               <div className="bg-white p-3 rounded-md">
                 <h4 className="text-sm font-medium text-gray-700">Bitrate Máximo</h4>
                 <p className="text-lg font-bold text-gray-900">{userLimits.bitrate.max} kbps</p>
-                <p className="text-xs text-gray-500">Configurado: {obsConfig?.max_bitrate || 0} kbps</p>
               </div>
               <div className="bg-white p-3 rounded-md">
                 <h4 className="text-sm font-medium text-gray-700">Espectadores Máximo</h4>
@@ -253,22 +268,6 @@ const DadosConexao: React.FC = () => {
                     }`}
                     style={{ width: `${userLimits.storage.percentage}%` }}
                   ></div>
-                </div>
-              </div>
-            </div>
-          )}
-          
-          {serverInfo && (
-            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-md">
-              <h4 className="text-blue-800 font-medium mb-2">📊 Informações do Servidor</h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-blue-700 text-sm">
-                <div>
-                  <p><strong>Servidor:</strong> {serverInfo.nome}</p>
-                  <p><strong>Tipo:</strong> {serverInfo.tipo_servidor}</p>
-                </div>
-                <div>
-                  <p><strong>Streamings Ativas:</strong> {serverInfo.streamings_ativas}/{serverInfo.limite_streamings}</p>
-                  <p><strong>Load CPU:</strong> {serverInfo.load_cpu}%</p>
                 </div>
               </div>
             </div>
@@ -354,7 +353,54 @@ const DadosConexao: React.FC = () => {
             <Play className="h-6 w-6 text-green-600" />
             <h2 className="text-xl font-semibold text-gray-800">Configuração OBS/Streamlabs</h2>
             <span className="bg-green-100 text-green-800 text-xs font-medium px-2.5 py-0.5 rounded">PRONTO PARA USO</span>
+            <button
+              onClick={() => setShowBitrateConfig(!showBitrateConfig)}
+              className="ml-auto text-primary-600 hover:text-primary-800 text-sm flex items-center"
+            >
+              <Settings className="h-4 w-4 mr-1" />
+              Configurar Bitrate
+            </button>
           </div>
+          
+          {/* Configuração de Bitrate */}
+          {showBitrateConfig && (
+            <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <h3 className="text-blue-900 font-medium mb-3">⚙️ Configuração de Bitrate</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-blue-800 mb-2">
+                    Bitrate Desejado (kbps)
+                  </label>
+                  <input
+                    type="number"
+                    min="500"
+                    max={userLimits?.bitrate.max || 5000}
+                    value={customBitrate || userLimits?.bitrate.max || 2500}
+                    onChange={(e) => handleBitrateChange(parseInt(e.target.value) || 0)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
+                  />
+                  <p className="text-xs text-blue-600 mt-1">
+                    Máximo permitido: {userLimits?.bitrate.max || 2500} kbps
+                  </p>
+                </div>
+                <div className="flex items-end">
+                  <button
+                    onClick={applyBitrateConfig}
+                    disabled={!customBitrate}
+                    className="px-4 py-2 bg-primary-600 text-white rounded-md hover:bg-primary-700 disabled:opacity-50"
+                  >
+                    Aplicar Configuração
+                  </button>
+                </div>
+              </div>
+              
+              {bitrateWarning && (
+                <div className="mt-3 p-2 bg-red-50 border border-red-200 rounded-md">
+                  <p className="text-red-800 text-sm">{bitrateWarning}</p>
+                </div>
+              )}
+            </div>
+          )}
           
           <div className="border border-gray-300 rounded-lg overflow-hidden">
             <table className="w-full">
@@ -401,12 +447,21 @@ const DadosConexao: React.FC = () => {
 
                 <tr className="border-b border-gray-200">
                   <td className="w-40 h-8 px-3 py-2 text-left font-medium text-gray-700 bg-gray-100">
-                    Bitrate Máximo
+                    Bitrate Configurado
                   </td>
                   <td className="px-3 py-2 text-left">
-                    <span className="text-gray-900 font-mono text-sm">
-                      {obsConfig.max_bitrate} kbps
-                    </span>
+                    <div className="flex items-center">
+                      <span className={`font-mono text-sm mr-2 ${
+                        obsConfig.max_bitrate > (userLimits?.bitrate.max || 2500) ? 'text-red-600' : 'text-gray-900'
+                      }`}>
+                        {obsConfig.max_bitrate} kbps
+                      </span>
+                      {obsConfig.max_bitrate > (userLimits?.bitrate.max || 2500) && (
+                        <span className="text-xs bg-red-100 text-red-800 px-2 py-1 rounded">
+                          EXCEDE LIMITE
+                        </span>
+                      )}
+                    </div>
                   </td>
                 </tr>
 
@@ -466,6 +521,7 @@ const DadosConexao: React.FC = () => {
               <p>4. <strong>Resolução:</strong> Recomendado 1080p ou 720p</p>
               <p>5. Clique em "Iniciar Transmissão" no OBS</p>
               <p className="text-red-700 font-medium">⚠️ IMPORTANTE: Não exceda o bitrate de {userLimits?.bitrate.max || obsConfig.max_bitrate} kbps do seu plano!</p>
+              <p className="text-green-700 font-medium">✅ O sistema bloqueará automaticamente transmissões que excedam o limite</p>
             </div>
           </div>
         </div>
@@ -601,7 +657,9 @@ const DadosConexao: React.FC = () => {
             <p>• <strong>URL para OBS/Streamlabs:</strong> {fmsData.rtmpUrl}</p>
             <p>• <strong>Stream Key:</strong> {fmsData.streamKey}</p>
             <p>• <strong>URL de Visualização (HLS):</strong> {fmsData.hlsUrl}</p>
+            <p>• <strong>Bitrate Máximo:</strong> {userLimits?.bitrate.max || user?.bitrate || 2500} kbps</p>
             <p>• Este é o servidor principal para transmissões ao vivo</p>
+            <p className="text-red-900 font-medium">⚠️ Transmissões que excedam o bitrate serão automaticamente rejeitadas</p>
           </div>
         </div>
       </div>
@@ -800,12 +858,13 @@ const DadosConexao: React.FC = () => {
               <ul className="list-disc list-inside space-y-2 text-gray-700">
                 <li>Servidor: <span className="font-medium font-mono">{fmsData.rtmpUrl}</span></li>
                 <li>Chave de transmissão: <span className="font-medium font-mono">{fmsData.streamKey}</span></li>
-                <li>Taxa de bits de vídeo: <span className="font-medium">2500-5000 Kbps</span></li>
+                <li>Taxa de bits de vídeo: <span className="font-medium">Máximo {userLimits?.bitrate.max || user?.bitrate || 2500} Kbps</span></li>
                 <li>Taxa de bits de áudio: <span className="font-medium">128-320 Kbps</span></li>
                 <li>Resolução: <span className="font-medium">1920x1080 (1080p) ou 1280x720 (720p)</span></li>
                 <li>FPS: <span className="font-medium">30 ou 60</span></li>
                 <li>Preset de codificação: <span className="font-medium">veryfast ou fast</span></li>
                 <li>Perfil: <span className="font-medium">main ou high</span></li>
+                <li className="text-red-600 font-medium">⚠️ CRÍTICO: Não exceda {userLimits?.bitrate.max || user?.bitrate || 2500} kbps ou a transmissão será rejeitada</li>
               </ul>
             </div>
           </div>
@@ -818,12 +877,13 @@ const DadosConexao: React.FC = () => {
               <ul className="list-disc list-inside space-y-2 text-gray-700">
                 <li>Servidor: <span className="font-medium font-mono">{fmsData.rtmpUrl}</span></li>
                 <li>Chave de transmissão: <span className="font-medium font-mono">{fmsData.streamKey}</span></li>
-                <li>Taxa de bits de vídeo: <span className="font-medium">2500-5000 Kbps</span></li>
+                <li>Taxa de bits de vídeo: <span className="font-medium">Máximo {userLimits?.bitrate.max || user?.bitrate || 2500} Kbps</span></li>
                 <li>Taxa de bits de áudio: <span className="font-medium">128-320 Kbps</span></li>
                 <li>Resolução: <span className="font-medium">1920x1080 (1080p) ou 1280x720 (720p)</span></li>
                 <li>FPS: <span className="font-medium">30 ou 60</span></li>
                 <li>Preset de codificação: <span className="font-medium">veryfast ou fast</span></li>
                 <li>Perfil: <span className="font-medium">main ou high</span></li>
+                <li className="text-red-600 font-medium">⚠️ CRÍTICO: Não exceda {userLimits?.bitrate.max || user?.bitrate || 2500} kbps ou a transmissão será rejeitada</li>
               </ul>
             </div>
           </div>
@@ -837,18 +897,23 @@ const DadosConexao: React.FC = () => {
                 <div className="text-center">
                   <h4 className="font-medium text-gray-800">Básica</h4>
                   <p className="text-sm text-gray-600">720p @ 30fps</p>
-                  <p className="text-sm text-gray-600">1500-2500 Kbps</p>
+                  <p className="text-sm text-gray-600">1500-{Math.min(2500, userLimits?.bitrate.max || 2500)} Kbps</p>
                 </div>
                 <div className="text-center">
                   <h4 className="font-medium text-gray-800">Boa</h4>
                   <p className="text-sm text-gray-600">1080p @ 30fps</p>
-                  <p className="text-sm text-gray-600">2500-4000 Kbps</p>
+                  <p className="text-sm text-gray-600">2500-{Math.min(4000, userLimits?.bitrate.max || 4000)} Kbps</p>
                 </div>
                 <div className="text-center">
                   <h4 className="font-medium text-gray-800">Excelente</h4>
                   <p className="text-sm text-gray-600">1080p @ 60fps</p>
-                  <p className="text-sm text-gray-600">4000-6000 Kbps</p>
+                  <p className="text-sm text-gray-600">4000-{Math.min(6000, userLimits?.bitrate.max || 6000)} Kbps</p>
                 </div>
+              </div>
+              <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+                <p className="text-yellow-800 text-sm">
+                  <strong>Seu limite:</strong> {userLimits?.bitrate.max || user?.bitrate || 2500} kbps máximo
+                </p>
               </div>
             </div>
           </div>
@@ -877,7 +942,11 @@ const DadosConexao: React.FC = () => {
           </div>
           <div className="flex items-start">
             <div className="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-sm font-bold mr-3 mt-0.5">5</div>
-            <p>Monitore as estatísticas em tempo real no dashboard</p>
+            <p><strong>Limites:</strong> O sistema bloqueia automaticamente transmissões que excedam os limites do plano</p>
+          </div>
+          <div className="flex items-start">
+            <div className="flex-shrink-0 w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-sm font-bold mr-3 mt-0.5">6</div>
+            <p><strong>Monitoramento:</strong> Acompanhe as estatísticas em tempo real no dashboard</p>
           </div>
         </div>
         
@@ -892,6 +961,11 @@ const DadosConexao: React.FC = () => {
               </span>
             )}
           </p>
+          <div className="mt-3 p-2 bg-green-50 border border-green-200 rounded-md">
+            <p className="text-green-800 text-sm font-medium">
+              🛡️ Proteção Ativa: O sistema monitora e bloqueia automaticamente transmissões que excedam os limites do seu plano
+            </p>
+          </div>
         </div>
       </div>
     </div>
