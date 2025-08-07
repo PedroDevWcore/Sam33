@@ -268,7 +268,7 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     // Construir URLs corretas
     const relativePath = `${userLogin}/${folderName}/${finalFileName}`;
     const hlsUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${relativePath}/playlist.m3u8`;
-    const vodUrl = `http://${wowzaHost}:6980/content/${relativePath}`;
+    const vodUrl = `/content/${relativePath}`;
 
     res.status(201).json({
       id: result.insertId,

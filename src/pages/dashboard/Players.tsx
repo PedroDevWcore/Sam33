@@ -31,13 +31,48 @@ const Players: React.FC = () => {
   const [previewVideo, setPreviewVideo] = useState<Video | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [sampleVideos, setSampleVideos] = useState<Video[]>([]);
+  const [liveStreamActive, setLiveStreamActive] = useState(false);
+  const [obsStreamActive, setObsStreamActive] = useState(false);
 
   const userLogin = user?.email?.split('@')[0] || `user_${user?.id || 'usuario'}`;
-  const streamUrl = `http://samhost.wcore.com.br:1935/samhost/${userLogin}_live/playlist.m3u8`;
+  const liveStreamUrl = `http://samhost.wcore.com.br:1935/samhost/${userLogin}_live/playlist.m3u8`;
 
   useEffect(() => {
     loadSampleVideos();
+    checkLiveStreams();
+    
+    // Verificar streams a cada 30 segundos
+    const interval = setInterval(checkLiveStreams, 30000);
+    return () => clearInterval(interval);
   }, []);
+
+  const checkLiveStreams = async () => {
+    try {
+      const token = await getToken();
+      
+      // Verificar stream OBS
+      const obsResponse = await fetch('/api/streaming/obs-status', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      
+      if (obsResponse.ok) {
+        const obsData = await obsResponse.json();
+        setObsStreamActive(obsData.success && obsData.obs_stream?.is_live);
+      }
+      
+      // Verificar transmissão de playlist
+      const streamResponse = await fetch('/api/streaming/status', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      
+      if (streamResponse.ok) {
+        const streamData = await streamResponse.json();
+        setLiveStreamActive(streamData.success && streamData.is_live && streamData.stream_type === 'playlist');
+      }
+    } catch (error) {
+      console.error('Erro ao verificar streams:', error);
+    }
+  };
 
   const loadSampleVideos = async () => {
     try {
@@ -59,6 +94,47 @@ const Players: React.FC = () => {
     }
   };
 
+  const getActiveStreamUrl = () => {
+    if (obsStreamActive) {
+      return `http://samhost.wcore.com.br:1935/samhost/${userLogin}_live/playlist.m3u8`;
+    } else if (liveStreamActive) {
+      return `http://samhost.wcore.com.br:1935/samhost/${userLogin}_playlist/playlist.m3u8`;
+    } else if (sampleVideos.length > 0) {
+      return getVideoUrl(sampleVideos[0].url);
+    }
+    return liveStreamUrl;
+  };
+
+  const getActiveStreamName = () => {
+    if (obsStreamActive) {
+      return `${userLogin}_live`;
+    } else if (liveStreamActive) {
+      return `${userLogin}_playlist`;
+    }
+    return `${userLogin}_live`;
+  };
+
+  const getVideoUrl = (url: string) => {
+    if (!url) return '';
+    
+    const userLogin = user?.email?.split('@')[0] || 'usuario';
+    const fileName = url.split('/').pop() || 'video.mp4';
+    const folderName = 'default';
+    
+    // Verificar se é MP4 ou precisa de conversão
+    const fileExtension = fileName.split('.').pop()?.toLowerCase();
+    const needsConversion = !['mp4'].includes(fileExtension || '');
+    
+    // Nome do arquivo final (MP4)
+    const finalFileName = needsConversion ? 
+      fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+    
+    const isProduction = window.location.hostname !== 'localhost';
+    const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
+    
+    return `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
+  };
+
   const playerConfigs: PlayerConfig[] = [
     {
       id: 'universal',
@@ -72,13 +148,13 @@ const Players: React.FC = () => {
   // Player Universal - Suporte completo
   const player = new UniversalPlayer({
     container: '#universal-player',
-    src: '${streamUrl}',
+    src: '${getActiveStreamUrl()}',
     autoplay: true,
     controls: true,
     responsive: true
   });
 </script>`,
-      previewUrl: streamUrl,
+      previewUrl: getActiveStreamUrl(),
       isActive: true
     },
     {
@@ -89,13 +165,13 @@ const Players: React.FC = () => {
       type: 'iframe',
       features: ['Fácil Incorporação', 'Responsivo', 'Seguro', 'Cross-domain'],
       code: `<iframe 
- src="/api/players/iframe?stream=${userLogin}_live" 
+ src="/api/players/iframe?stream=${getActiveStreamName()}" 
   width="640" 
   height="360" 
   frameborder="0" 
   allowfullscreen>
 </iframe>`,
-      previewUrl: `/api/players/iframe?stream=${userLogin}_live`,
+      previewUrl: `/api/players/iframe?stream=${getActiveStreamName()}`,
       isActive: false
     },
     {
@@ -111,11 +187,10 @@ const Players: React.FC = () => {
   controls 
   autoplay 
   muted>
-  <source src="${streamUrl}" type="application/vnd.apple.mpegurl">
-  <source src="http://samhost.wcore.com.br:1935/samhost/${userLogin}_live.mp4" type="video/mp4">
+  <source src="${getActiveStreamUrl()}" type="application/vnd.apple.mpegurl">
   Seu navegador não suporta vídeo HTML5.
 </video>`,
-      previewUrl: streamUrl,
+      previewUrl: getActiveStreamUrl(),
       isActive: false
     },
     {
@@ -132,7 +207,7 @@ const Players: React.FC = () => {
     controls 
     width="100%" 
     height="auto">
-    <source src="${streamUrl}" type="application/vnd.apple.mpegurl">
+    <source src="${getActiveStreamUrl()}" type="application/vnd.apple.mpegurl">
   </video>
 </div>
 <style>
@@ -141,7 +216,7 @@ const Players: React.FC = () => {
   touch-action: manipulation; 
 }
 </style>`,
-      previewUrl: streamUrl,
+      previewUrl: getActiveStreamUrl(),
       isActive: false
     },
     {
@@ -152,14 +227,14 @@ const Players: React.FC = () => {
       type: 'facebook',
       features: ['Facebook Live', 'Social Media', 'Compartilhamento', 'Embeds'],
       code: `<div class="fb-video" 
-     data-href="/api/players/social?stream=${userLogin}_live" 
+     data-href="/api/players/social?stream=${getActiveStreamName()}" 
      data-width="640" 
      data-show-text="false">
 </div>
 <script async defer crossorigin="anonymous" 
         src="https://connect.facebook.net/pt_BR/sdk.js#xfbml=1&version=v18.0">
 </script>`,
-      previewUrl: `/api/players/social?stream=${userLogin}_live`,
+      previewUrl: `/api/players/social?stream=${getActiveStreamName()}`,
       isActive: false
     },
     {
@@ -173,11 +248,11 @@ const Players: React.FC = () => {
 SimpleExoPlayer player = new SimpleExoPlayer.Builder(context).build();
 playerView.setPlayer(player);
 
-MediaItem mediaItem = MediaItem.fromUri("${streamUrl}");
+MediaItem mediaItem = MediaItem.fromUri("${getActiveStreamUrl()}");
 player.setMediaItem(mediaItem);
 player.prepare();
 player.play();`,
-      previewUrl: streamUrl,
+      previewUrl: getActiveStreamUrl(),
       isActive: false
     }
   ];
@@ -220,7 +295,7 @@ player.play();`,
       setPreviewVideo({
         id: 0,
         nome: 'Stream ao Vivo',
-        url: streamUrl
+        url: liveStreamUrl
       });
     }
     setShowPreview(true);
@@ -255,7 +330,7 @@ player.play();`,
         return (
           <div className="h-48 bg-black rounded-lg overflow-hidden">
             <UniversalVideoPlayer
-              src={sampleVideos[0]?.url || streamUrl}
+              src={sampleVideos[0]?.url || liveStreamUrl}
               title={sampleVideos[0]?.nome || 'Stream ao Vivo'}
               isLive={!sampleVideos[0]}
               autoplay={false}
@@ -285,8 +360,8 @@ player.play();`,
               muted
               poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 640 360'%3E%3Crect width='640' height='360' fill='%23000'/%3E%3Ctext x='320' y='180' text-anchor='middle' fill='white' font-family='Arial' font-size='24'%3EHTML5 Player%3C/text%3E%3C/svg%3E"
             >
-              <source src={sampleVideos[0]?.url || streamUrl} type="application/vnd.apple.mpegurl" />
-              <source src={sampleVideos[0]?.url || streamUrl} type="video/mp4" />
+              <source src={sampleVideos[0]?.url || liveStreamUrl} type="application/vnd.apple.mpegurl" />
+              <source src={sampleVideos[0]?.url || liveStreamUrl} type="video/mp4" />
             </video>
           </div>
         );
@@ -365,9 +440,19 @@ player.play();`,
       <div className="bg-white rounded-lg shadow-sm p-6 border-l-4 border-green-500">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-semibold text-gray-800">Player Ativo</h2>
-          <span className="bg-green-100 text-green-800 text-sm font-medium px-3 py-1 rounded-full">
-            {playerConfigs.find(p => p.id === activePlayer)?.name}
-          </span>
+          <div className="flex items-center space-x-3">
+            {(obsStreamActive || liveStreamActive) && (
+              <div className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                <span className="text-sm font-medium text-red-600">
+                  {obsStreamActive ? 'OBS AO VIVO' : 'PLAYLIST AO VIVO'}
+                </span>
+              </div>
+            )}
+            <span className="bg-green-100 text-green-800 text-sm font-medium px-3 py-1 rounded-full">
+              {playerConfigs.find(p => p.id === activePlayer)?.name}
+            </span>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -393,7 +478,9 @@ player.play();`,
                 className="w-full bg-primary-600 text-white px-4 py-2 rounded-md hover:bg-primary-700 flex items-center justify-center"
               >
                 <Eye className="h-4 w-4 mr-2" />
-                Visualizar Stream ao Vivo
+                {obsStreamActive ? 'Visualizar OBS ao Vivo' : 
+                 liveStreamActive ? 'Visualizar Playlist ao Vivo' : 
+                 'Visualizar Stream'}
               </button>
 
               {sampleVideos.length > 0 && (
@@ -411,7 +498,7 @@ player.play();`,
                 className="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 flex items-center justify-center"
               >
                 <ExternalLink className="h-4 w-4 mr-2" />
-                Abrir Player Externo
+                {obsStreamActive || liveStreamActive ? 'Abrir Stream Externo' : 'Abrir Player Externo'}
               </button>
             </div>
           </div>
@@ -587,11 +674,31 @@ player.play();`,
       {/* Informações Técnicas */}
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
         <h3 className="text-blue-900 font-medium mb-3">📋 Informações dos Players</h3>
+        
+        {/* Status das transmissões */}
+        <div className="mb-4 p-3 bg-white rounded-md">
+          <h4 className="font-medium mb-2">Status das Transmissões:</h4>
+          <div className="flex items-center space-x-4 text-sm">
+            <div className="flex items-center space-x-2">
+              <div className={`w-2 h-2 rounded-full ${obsStreamActive ? 'bg-red-500 animate-pulse' : 'bg-gray-300'}`}></div>
+              <span className={obsStreamActive ? 'text-red-600 font-medium' : 'text-gray-500'}>
+                OBS {obsStreamActive ? 'AO VIVO' : 'OFFLINE'}
+              </span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <div className={`w-2 h-2 rounded-full ${liveStreamActive ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`}></div>
+              <span className={liveStreamActive ? 'text-green-600 font-medium' : 'text-gray-500'}>
+                Playlist {liveStreamActive ? 'AO VIVO' : 'OFFLINE'}
+              </span>
+            </div>
+          </div>
+        </div>
+        
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-blue-800 text-sm">
           <div>
             <h4 className="font-medium mb-2">URLs de Stream:</h4>
             <ul className="space-y-1">
-              <li>• <strong>HLS:</strong> {streamUrl}</li>
+              <li>• <strong>Stream Ativo:</strong> {getActiveStreamUrl()}</li>
               <li>• <strong>RTMP:</strong> rtmp://samhost.wcore.com.br:1935/samhost/{userLogin}_live</li>
             </ul>
           </div>
@@ -605,6 +712,14 @@ player.play();`,
             </ul>
           </div>
         </div>
+        
+        {(obsStreamActive || liveStreamActive) && (
+          <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-md">
+            <p className="text-green-800 text-sm font-medium">
+              🎉 Transmissão ativa detectada! Os players agora mostram seu conteúdo ao vivo.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -44,27 +44,10 @@ router.get('/obs-config', authMiddleware, async (req, res) => {
 
     const serverInfo = serverRows.length > 0 ? serverRows[0] : null;
 
-    // Inicializar serviço Wowza
-    const wowzaService = new WowzaStreamingService();
-    const initialized = await wowzaService.initializeFromDatabase(userId);
-    
-    if (!initialized) {
-      return res.json({ 
-        success: true, 
-        obs_config: {
-          rtmp_url: `rtmp://samhost.wcore.com.br:1935/samhost`,
-          stream_key: `${userLogin}_live`,
-          hls_url: `http://samhost.wcore.com.br:1935/samhost/${userLogin}_live/playlist.m3u8`,
-          max_bitrate: Math.min(userConfig.bitrate || 2500, userConfig.bitrate || 2500),
-          max_viewers: userConfig.espectadores || 100,
-          recording_enabled: userConfig.status_gravando === 'sim',
-          recording_path: `/usr/local/WowzaStreamingEngine/content/${userLogin}/recordings/`
-        },
-        user_limits: null,
-        warnings: [],
-        server_info: serverInfo
-      });
-    }
+    // Verificar se há bitrate solicitado na requisição
+    const requestedBitrate = req.query.bitrate ? parseInt(req.query.bitrate) : null;
+    const maxBitrate = userConfig.bitrate || 2500;
+    const allowedBitrate = requestedBitrate ? Math.min(requestedBitrate, maxBitrate) : maxBitrate;
 
     // Garantir que o diretório do usuário existe no servidor
     try {
@@ -73,43 +56,54 @@ router.get('/obs-config', authMiddleware, async (req, res) => {
     } catch (dirError) {
       console.warn('Aviso: Erro ao verificar/criar diretório do usuário:', dirError.message);
     }
-    // Configurar stream OBS
-    // Verificar se há bitrate solicitado na requisição
-    const requestedBitrate = req.query.bitrate ? parseInt(req.query.bitrate) : null;
 
-    const obsResult = await wowzaService.startOBSStream({
-      userId,
-      userLogin,
-      userConfig: {
-        ...userConfig,
-        requested_bitrate: requestedBitrate
-      },
-      platforms: [] // Plataformas serão configuradas separadamente
-    });
-
-    if (!obsResult.success) {
-      return res.status(500).json({ 
-        success: false, 
-        error: obsResult.error || 'Erro ao configurar stream OBS' 
-      });
+    // Verificar limites e gerar avisos
+    const warnings = [];
+    if (requestedBitrate && requestedBitrate > maxBitrate) {
+      warnings.push(`Bitrate solicitado (${requestedBitrate} kbps) excede o limite do plano (${maxBitrate} kbps). Será limitado automaticamente.`);
     }
-
-    // Verificar limites do usuário
-    const limitsCheck = await wowzaService.checkUserLimits(userConfig, requestedBitrate);
-
+    if (serverInfo && serverInfo.streamings_ativas >= serverInfo.limite_streamings * 0.9) {
+      warnings.push('Servidor próximo do limite de capacidade');
+    }
+    if (serverInfo && serverInfo.load_cpu > 80) {
+      warnings.push('Servidor com alta carga de CPU');
+    }
+    
+    const usedSpace = userConfig.espaco_usado || 0;
+    const totalSpace = userConfig.espaco || 1000;
+    const storagePercentage = Math.round((usedSpace / totalSpace) * 100);
+    
+    if (storagePercentage > 90) {
+      warnings.push('Espaço de armazenamento quase esgotado');
+    }
     res.json({
       success: true,
       obs_config: {
-        rtmp_url: obsResult.data.rtmpUrl,
-        stream_key: obsResult.data.streamKey,
-        hls_url: obsResult.data.hlsUrl,
-        max_bitrate: obsResult.data.maxBitrate,
+        rtmp_url: `rtmp://samhost.wcore.com.br:1935/samhost`,
+        stream_key: `${userLogin}_live`,
+        hls_url: `http://samhost.wcore.com.br:1935/samhost/${userLogin}_live/playlist.m3u8`,
+        max_bitrate: allowedBitrate,
         max_viewers: userConfig.espectadores,
         recording_enabled: userConfig.status_gravando === 'sim',
-        recording_path: obsResult.data.recordingPath
+        recording_path: `/usr/local/WowzaStreamingEngine/content/${userLogin}/recordings/`
       },
-      user_limits: limitsCheck.success ? limitsCheck.limits : null,
-      warnings: limitsCheck.success ? limitsCheck.warnings : [],
+      user_limits: {
+        bitrate: {
+          max: maxBitrate,
+          requested: requestedBitrate || maxBitrate,
+          allowed: allowedBitrate
+        },
+        viewers: {
+          max: userConfig.espectadores || 100
+        },
+        storage: {
+          max: totalSpace,
+          used: usedSpace,
+          available: totalSpace - usedSpace,
+          percentage: storagePercentage
+        }
+      },
+      warnings: warnings,
       server_info: serverInfo
     });
   } catch (error) {

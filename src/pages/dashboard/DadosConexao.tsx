@@ -59,6 +59,11 @@ const DadosConexao: React.FC = () => {
   const [bitrateWarning, setBitrateWarning] = useState<string>('');
   const [customBitrate, setCustomBitrate] = useState<number | null>(null);
   const [showBitrateConfig, setShowBitrateConfig] = useState(false);
+  const [bitrateValidation, setBitrateValidation] = useState<{
+    isValid: boolean;
+    message: string;
+    canStream: boolean;
+  }>({ isValid: true, message: '', canStream: true });
   
   const userLogin = user?.email?.split('@')[0] || `user_${user?.id || 'usuario'}`;
   
@@ -159,12 +164,29 @@ const DadosConexao: React.FC = () => {
   const handleBitrateChange = (newBitrate: number) => {
     const maxBitrate = userLimits?.bitrate.max || 2500;
     
+    let validation = { isValid: true, message: '', canStream: true };
+    
     if (newBitrate > maxBitrate) {
-      setBitrateWarning(`Bitrate solicitado (${newBitrate} kbps) excede o limite do seu plano (${maxBitrate} kbps). Será limitado para ${maxBitrate} kbps.`);
+      validation = {
+        isValid: false,
+        message: `❌ BLOQUEADO: Bitrate ${newBitrate} kbps excede o limite do plano (${maxBitrate} kbps). A transmissão será rejeitada automaticamente.`,
+        canStream: false
+      };
+    } else if (newBitrate > maxBitrate * 0.9) {
+      validation = {
+        isValid: true,
+        message: `⚠️ ATENÇÃO: Bitrate ${newBitrate} kbps está próximo do limite (${maxBitrate} kbps). Recomendamos usar até ${Math.floor(maxBitrate * 0.9)} kbps para segurança.`,
+        canStream: true
+      };
     } else {
-      setBitrateWarning('');
+      validation = {
+        isValid: true,
+        message: `✅ Bitrate ${newBitrate} kbps está dentro do limite permitido.`,
+        canStream: true
+      };
     }
     
+    setBitrateValidation(validation);
     setCustomBitrate(newBitrate);
   };
 
@@ -382,27 +404,59 @@ const DadosConexao: React.FC = () => {
                   <p className="text-xs text-blue-600 mt-1">
                     Máximo permitido: {userLimits?.bitrate.max || 2500} kbps
                   </p>
+                  
+                  {/* Validação em tempo real */}
+                  {customBitrate && (
+                    <div className={`mt-2 p-2 rounded-md text-xs ${
+                      bitrateValidation.canStream ? 
+                        bitrateValidation.isValid ? 'bg-green-50 border border-green-200' : 'bg-yellow-50 border border-yellow-200'
+                        : 'bg-red-50 border border-red-200'
+                    }`}>
+                      <p className={
+                        bitrateValidation.canStream ? 
+                          bitrateValidation.isValid ? 'text-green-800' : 'text-yellow-800'
+                          : 'text-red-800'
+                      }>
+                        {bitrateValidation.message}
+                      </p>
+                    </div>
+                  )}
                 </div>
                 <div className="flex items-end">
                   <button
                     onClick={applyBitrateConfig}
-                    disabled={!customBitrate}
-                    className="px-4 py-2 bg-primary-600 text-white rounded-md hover:bg-primary-700 disabled:opacity-50"
+                    disabled={!customBitrate || !bitrateValidation.canStream}
+                    className={`px-4 py-2 rounded-md disabled:opacity-50 ${
+                      bitrateValidation.canStream ? 
+                        'bg-primary-600 text-white hover:bg-primary-700' : 
+                        'bg-red-600 text-white cursor-not-allowed'
+                    }`}
                   >
-                    Aplicar Configuração
+                    {bitrateValidation.canStream ? 'Aplicar Configuração' : 'Bitrate Bloqueado'}
                   </button>
                 </div>
               </div>
               
-              {bitrateWarning && (
-                <div className="mt-3 p-2 bg-red-50 border border-red-200 rounded-md">
-                  <p className="text-red-800 text-sm">{bitrateWarning}</p>
+              {!bitrateValidation.canStream && (
+                <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-md">
+                  <h4 className="text-red-900 font-medium mb-2">🚫 Transmissão Bloqueada</h4>
+                  <p className="text-red-800 text-sm mb-2">
+                    O sistema bloqueará automaticamente transmissões que excedam o limite de bitrate do seu plano.
+                  </p>
+                  <p className="text-red-700 text-xs">
+                    Para transmitir com bitrate maior, entre em contato para fazer upgrade do seu plano.
+                  </p>
                 </div>
               )}
             </div>
           )}
           
-          <div className="border border-gray-300 rounded-lg overflow-hidden">
+                🛡️ Proteção Ativa: O sistema rejeita automaticamente transmissões que excedam os limites do seu plano
+              </p>
+            </div>
+            <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded-md">
+              <p className="text-red-800 text-sm font-medium">
+                🚫 Bloqueio Automático: Transmissões com bitrate acima de {userLimits?.bitrate.max || user?.bitrate || 2500} kbps são rejeitadas
             <table className="w-full">
               <tbody className="bg-gray-50">
                 <tr className="border-b border-gray-200">
@@ -521,7 +575,8 @@ const DadosConexao: React.FC = () => {
               <p>4. <strong>Resolução:</strong> Recomendado 1080p ou 720p</p>
               <p>5. Clique em "Iniciar Transmissão" no OBS</p>
               <p className="text-red-700 font-medium">⚠️ IMPORTANTE: Não exceda o bitrate de {userLimits?.bitrate.max || obsConfig.max_bitrate} kbps do seu plano!</p>
-              <p className="text-green-700 font-medium">✅ O sistema bloqueará automaticamente transmissões que excedam o limite</p>
+              <p className="text-red-700 font-medium">🚫 O sistema bloqueará automaticamente transmissões que excedam o limite</p>
+              <p className="text-blue-700 font-medium">💡 Use a configuração de bitrate acima para testar diferentes valores</p>
             </div>
           </div>
         </div>
@@ -964,6 +1019,9 @@ const DadosConexao: React.FC = () => {
           <div className="mt-3 p-2 bg-green-50 border border-green-200 rounded-md">
             <p className="text-green-800 text-sm font-medium">
               🛡️ Proteção Ativa: O sistema monitora e bloqueia automaticamente transmissões que excedam os limites do seu plano
+            </p>
+            <p className="text-red-800 text-sm font-medium mt-1">
+              🚫 Transmissões que excedam este limite serão automaticamente rejeitadas pelo servidor
             </p>
           </div>
         </div>
