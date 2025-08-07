@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { ChevronLeft, Upload, Play, Trash2, FolderPlus, Eye, Download, RefreshCw, HardDrive, AlertCircle, CheckCircle, X, Maximize, Minimize, Edit2, ChevronDown, ChevronRight, Folder, Video, Save } from 'lucide-react';
+import { ChevronLeft, Upload, Play, Trash2, FolderPlus, Eye, Download, RefreshCw, HardDrive, AlertCircle, CheckCircle, X, Edit2, ChevronDown, ChevronRight, Folder, Video, Save, ExternalLink } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import { useAuth } from '../../context/AuthContext';
-import UniversalVideoPlayer from '../../components/UniversalVideoPlayer';
 
 interface Folder {
   id: number;
@@ -38,10 +37,9 @@ const GerenciarVideos: React.FC = () => {
   const [newFolderName, setNewFolderName] = useState('');
   const [folderUsages, setFolderUsages] = useState<Record<number, FolderUsage>>({});
   
-  // Player modal state
+  // Player modal state - player simples
   const [showPlayerModal, setShowPlayerModal] = useState(false);
   const [currentVideo, setCurrentVideo] = useState<Video | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Edit video state
   const [editingVideo, setEditingVideo] = useState<{ id: number; nome: string } | null>(null);
@@ -60,10 +58,11 @@ const GerenciarVideos: React.FC = () => {
       const data = await response.json();
       setFolders(data);
       
-      // Carregar vídeos para cada pasta
-      for (const folder of data) {
-        await loadVideosForFolder(folder.id);
-        await loadFolderUsage(folder.id);
+      // Expandir primeira pasta por padrão
+      if (data.length > 0) {
+        setExpandedFolders({ [data[0].id]: true });
+        await loadVideosForFolder(data[0].id);
+        await loadFolderUsage(data[0].id);
       }
     } catch (error) {
       toast.error('Erro ao carregar pastas');
@@ -111,11 +110,19 @@ const GerenciarVideos: React.FC = () => {
     }
   };
 
-  const toggleFolder = (folderId: number) => {
+  const toggleFolder = async (folderId: number) => {
+    const isCurrentlyExpanded = expandedFolders[folderId];
+    
     setExpandedFolders(prev => ({
       ...prev,
       [folderId]: !prev[folderId]
     }));
+
+    // Se está expandindo, carregar vídeos
+    if (!isCurrentlyExpanded) {
+      await loadVideosForFolder(folderId);
+      await loadFolderUsage(folderId);
+    }
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>, folderId: number) => {
@@ -225,9 +232,11 @@ const GerenciarVideos: React.FC = () => {
         toast.success('Nome do vídeo atualizado com sucesso!');
         setEditingVideo(null);
         setNewVideoName('');
-        // Recarregar vídeos de todas as pastas
+        // Recarregar vídeos de todas as pastas expandidas
         for (const folder of folders) {
-          await loadVideosForFolder(folder.id);
+          if (expandedFolders[folder.id]) {
+            await loadVideosForFolder(folder.id);
+          }
         }
       } else {
         const errorData = await response.json();
@@ -284,7 +293,6 @@ const GerenciarVideos: React.FC = () => {
   const closeVideoPlayer = () => {
     setShowPlayerModal(false);
     setCurrentVideo(null);
-    setIsFullscreen(false);
   };
 
   const buildVideoUrl = (url: string) => {
@@ -305,40 +313,30 @@ const GerenciarVideos: React.FC = () => {
     return `/content/${cleanPath}`;
   };
 
-  const openVideoInNewTab = (video: Video) => {
+  const buildHLSUrl = (video: Video) => {
+    if (!video.url) return '';
+    
+    const userLogin = user?.email?.split('@')[0] || 'usuario';
+    const folderName = video.folder || 'default';
+    const fileName = video.nome;
+    
+    // Verificar se é MP4 ou precisa de conversão
+    const fileExtension = fileName.split('.').pop()?.toLowerCase();
+    const needsConversion = !['mp4'].includes(fileExtension || '');
+    
+    // Nome do arquivo final (MP4)
+    const finalFileName = needsConversion ? 
+      fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+    
     const isProduction = window.location.hostname !== 'localhost';
     const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-    const wowzaUser = 'admin';
-    const wowzaPassword = 'FK38Ca2SuE6jvJXed97VMn';
     
-    if (video.url) {
-      let externalUrl;
-      
-      // Para vídeos SSH, construir URL direta
-      if (video.url.includes('/api/videos-ssh/')) {
-        try {
-          const videoId = video.url.split('/stream/')[1]?.split('?')[0];
-          if (videoId) {
-            const remotePath = Buffer.from(videoId, 'base64').toString('utf-8');
-            const relativePath = remotePath.replace('/usr/local/WowzaStreamingEngine/content/', '');
-            externalUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${relativePath}`;
-          } else {
-            externalUrl = video.url;
-          }
-        } catch (error) {
-          externalUrl = video.url;
-        }
-      } else if (video.url.startsWith('/content')) {
-        externalUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980${video.url}`;
-      } else if (!video.url.startsWith('http')) {
-        const cleanPath = video.url.replace(/^\/+/, '');
-        externalUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${cleanPath}`;
-      } else {
-        externalUrl = video.url;
-      }
-      
-      window.open(externalUrl, '_blank');
-    }
+    return `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
+  };
+
+  const openVideoInNewTab = (video: Video) => {
+    const hlsUrl = buildHLSUrl(video);
+    window.open(hlsUrl, '_blank');
   };
 
   const syncFolder = async (folderId: number) => {
@@ -422,7 +420,7 @@ const GerenciarVideos: React.FC = () => {
       </div>
 
       {/* Lista de Pastas e Vídeos */}
-      <div className="bg-white rounded-lg shadow-sm">
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200">
         {folders.length === 0 ? (
           <div className="p-8 text-center text-gray-500">
             <Folder className="h-12 w-12 mx-auto mb-4 text-gray-300" />
@@ -437,78 +435,81 @@ const GerenciarVideos: React.FC = () => {
               const usage = folderUsages[folder.id];
 
               return (
-                <div key={folder.id} className="p-6">
+                <div key={folder.id}>
                   {/* Cabeçalho da Pasta */}
-                  <div className="flex items-center justify-between mb-4">
-                    <div 
-                      className="flex items-center space-x-3 cursor-pointer hover:bg-gray-50 p-2 rounded-lg transition-colors"
-                      onClick={() => toggleFolder(folder.id)}
-                    >
-                      {isExpanded ? (
-                        <ChevronDown className="h-5 w-5 text-gray-600" />
-                      ) : (
-                        <ChevronRight className="h-5 w-5 text-gray-600" />
-                      )}
-                      <Folder className="h-6 w-6 text-blue-600" />
-                      <div>
-                        <h3 className="text-lg font-semibold text-gray-900">{folder.nome}</h3>
-                        <p className="text-sm text-gray-500">
-                          {videos.length} vídeo(s)
-                          {usage && ` • ${usage.used}MB / ${usage.total}MB (${usage.percentage}%)`}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center space-x-3">
-                      {/* Indicador de uso de espaço */}
-                      {usage && (
-                        <div className="flex items-center space-x-2">
-                          <div className="w-20 bg-gray-200 rounded-full h-2">
-                            <div
-                              className={`h-2 rounded-full transition-all duration-300 ${
-                                usage.percentage > 90 ? 'bg-red-600' :
-                                usage.percentage > 70 ? 'bg-yellow-600' :
-                                'bg-green-600'
-                              }`}
-                              style={{ width: `${Math.min(100, usage.percentage)}%` }}
-                            ></div>
-                          </div>
-                          <span className={`text-xs font-medium ${
-                            usage.percentage > 90 ? 'text-red-600' :
-                            usage.percentage > 70 ? 'text-yellow-600' :
-                            'text-green-600'
-                          }`}>
-                            {usage.percentage}%
-                          </span>
-                        </div>
-                      )}
-
-                      <label className="bg-primary-600 text-white px-3 py-2 rounded-md hover:bg-primary-700 cursor-pointer flex items-center text-sm">
-                        <Upload className="h-4 w-4 mr-2" />
-                        {uploading ? 'Enviando...' : 'Enviar'}
-                        <input
-                          type="file"
-                          accept="video/*,.mp4,.avi,.mov,.wmv,.flv,.webm,.mkv,.3gp,.3g2,.ts,.mpg,.mpeg,.ogv,.m4v,.asf"
-                          onChange={(e) => handleFileUpload(e, folder.id)}
-                          className="hidden"
-                          disabled={uploading}
-                        />
-                      </label>
-                      
-                      <button
-                        onClick={() => syncFolder(folder.id)}
-                        disabled={loading}
-                        className="bg-gray-600 text-white px-3 py-2 rounded-md hover:bg-gray-700 disabled:opacity-50 flex items-center text-sm"
-                        title="Sincronizar com servidor"
+                  <div className="p-4 hover:bg-gray-50 transition-colors">
+                    <div className="flex items-center justify-between">
+                      <div 
+                        className="flex items-center space-x-3 cursor-pointer flex-1"
+                        onClick={() => toggleFolder(folder.id)}
                       >
-                        <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                      </button>
+                        {isExpanded ? (
+                          <ChevronDown className="h-5 w-5 text-gray-600" />
+                        ) : (
+                          <ChevronRight className="h-5 w-5 text-gray-600" />
+                        )}
+                        <Folder className="h-6 w-6 text-blue-600" />
+                        <div className="flex-1">
+                          <h3 className="text-lg font-semibold text-gray-900">{folder.nome}</h3>
+                          <div className="flex items-center space-x-4 text-sm text-gray-500">
+                            <span>{videos.length} vídeo(s)</span>
+                            {usage && (
+                              <>
+                                <span>•</span>
+                                <span>{usage.used}MB / {usage.total}MB</span>
+                                <div className="flex items-center space-x-2">
+                                  <div className="w-16 bg-gray-200 rounded-full h-1.5">
+                                    <div
+                                      className={`h-1.5 rounded-full transition-all duration-300 ${
+                                        usage.percentage > 90 ? 'bg-red-600' :
+                                        usage.percentage > 70 ? 'bg-yellow-600' :
+                                        'bg-green-600'
+                                      }`}
+                                      style={{ width: `${Math.min(100, usage.percentage)}%` }}
+                                    ></div>
+                                  </div>
+                                  <span className={`text-xs font-medium ${
+                                    usage.percentage > 90 ? 'text-red-600' :
+                                    usage.percentage > 70 ? 'text-yellow-600' :
+                                    'text-green-600'
+                                  }`}>
+                                    {usage.percentage}%
+                                  </span>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center space-x-2">
+                        <label className="bg-primary-600 text-white px-3 py-2 rounded-md hover:bg-primary-700 cursor-pointer flex items-center text-sm">
+                          <Upload className="h-4 w-4 mr-2" />
+                          {uploading ? 'Enviando...' : 'Enviar'}
+                          <input
+                            type="file"
+                            accept="video/*,.mp4,.avi,.mov,.wmv,.flv,.webm,.mkv,.3gp,.3g2,.ts,.mpg,.mpeg,.ogv,.m4v,.asf"
+                            onChange={(e) => handleFileUpload(e, folder.id)}
+                            className="hidden"
+                            disabled={uploading}
+                          />
+                        </label>
+                        
+                        <button
+                          onClick={() => syncFolder(folder.id)}
+                          disabled={loading}
+                          className="bg-gray-600 text-white px-3 py-2 rounded-md hover:bg-gray-700 disabled:opacity-50 flex items-center text-sm"
+                          title="Sincronizar com servidor"
+                        >
+                          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                        </button>
+                      </div>
                     </div>
                   </div>
 
                   {/* Lista de Vídeos (expandível) */}
                   {isExpanded && (
-                    <div className="ml-8 space-y-3">
+                    <div className="bg-gray-50 border-t border-gray-200">
                       {videos.length === 0 ? (
                         <div className="text-center py-8 text-gray-500">
                           <Video className="h-8 w-8 mx-auto mb-2 text-gray-300" />
@@ -516,20 +517,14 @@ const GerenciarVideos: React.FC = () => {
                           <p className="text-xs">Use o botão "Enviar" para adicionar vídeos</p>
                         </div>
                       ) : (
-                        <div className="grid grid-cols-1 gap-3">
+                        <div className="divide-y divide-gray-200">
                           {videos.map((video) => (
-                            <div key={video.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
+                            <div key={video.id} className="p-4 hover:bg-gray-100 transition-colors">
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center space-x-4 flex-1">
-                                  {/* Thumbnail */}
-                                  <div className="w-16 h-12 bg-gray-100 rounded overflow-hidden flex-shrink-0">
-                                    <video
-                                      src={buildVideoUrl(video.url)}
-                                      className="w-full h-full object-cover cursor-pointer"
-                                      onClick={() => openVideoPlayer(video)}
-                                      preload="metadata"
-                                      muted
-                                    />
+                                  {/* Thumbnail simples */}
+                                  <div className="w-20 h-12 bg-gray-200 rounded overflow-hidden flex-shrink-0 flex items-center justify-center">
+                                    <Video className="h-6 w-6 text-gray-400" />
                                   </div>
                                   
                                   {/* Informações do vídeo */}
@@ -540,7 +535,7 @@ const GerenciarVideos: React.FC = () => {
                                           type="text"
                                           value={newVideoName}
                                           onChange={(e) => setNewVideoName(e.target.value)}
-                                          className="flex-1 px-2 py-1 border border-gray-300 rounded text-sm"
+                                          className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-primary-500 focus:border-primary-500"
                                           onKeyPress={(e) => {
                                             if (e.key === 'Enter') {
                                               saveVideoName();
@@ -552,78 +547,81 @@ const GerenciarVideos: React.FC = () => {
                                         />
                                         <button
                                           onClick={saveVideoName}
-                                          className="text-green-600 hover:text-green-800"
+                                          className="text-green-600 hover:text-green-800 p-2"
                                           title="Salvar"
                                         >
                                           <Save className="h-4 w-4" />
                                         </button>
                                         <button
                                           onClick={cancelEdit}
-                                          className="text-gray-600 hover:text-gray-800"
+                                          className="text-gray-600 hover:text-gray-800 p-2"
                                           title="Cancelar"
                                         >
                                           <X className="h-4 w-4" />
                                         </button>
                                       </div>
                                     ) : (
-                                      <h4 className="font-medium text-gray-900 truncate" title={video.nome}>
-                                        {video.nome}
-                                      </h4>
+                                      <>
+                                        <h4 className="font-medium text-gray-900 truncate" title={video.nome}>
+                                          {video.nome}
+                                        </h4>
+                                        <div className="flex items-center space-x-4 text-sm text-gray-600 mt-1">
+                                          {video.duracao && (
+                                            <span>⏱️ {formatDuration(video.duracao)}</span>
+                                          )}
+                                          {video.tamanho && (
+                                            <span>💾 {formatFileSize(video.tamanho)}</span>
+                                          )}
+                                        </div>
+                                      </>
                                     )}
-                                    
-                                    <div className="text-sm text-gray-600 mt-1">
-                                      {video.duracao && (
-                                        <span className="mr-4">Duração: {formatDuration(video.duracao)}</span>
-                                      )}
-                                      {video.tamanho && (
-                                        <span>Tamanho: {formatFileSize(video.tamanho)}</span>
-                                      )}
-                                    </div>
                                   </div>
                                 </div>
 
                                 {/* Ações do vídeo */}
-                                <div className="flex items-center space-x-2 ml-4">
-                                  <button
-                                    onClick={() => openVideoPlayer(video)}
-                                    className="text-primary-600 hover:text-primary-800 p-2 rounded-md hover:bg-primary-50"
-                                    title="Reproduzir no player"
-                                  >
-                                    <Play className="h-4 w-4" />
-                                  </button>
-                                  
-                                  <button
-                                    onClick={() => openVideoInNewTab(video)}
-                                    className="text-blue-600 hover:text-blue-800 p-2 rounded-md hover:bg-blue-50"
-                                    title="Abrir em nova aba"
-                                  >
-                                    <Eye className="h-4 w-4" />
-                                  </button>
-                                  
-                                  <button
-                                    onClick={() => handleEditVideo(video)}
-                                    className="text-orange-600 hover:text-orange-800 p-2 rounded-md hover:bg-orange-50"
-                                    title="Editar nome"
-                                  >
-                                    <Edit2 className="h-4 w-4" />
-                                  </button>
-                                  
-                                  <button
-                                    onClick={() => openVideoInNewTab(video)}
-                                    className="text-green-600 hover:text-green-800 p-2 rounded-md hover:bg-green-50"
-                                    title="Download"
-                                  >
-                                    <Download className="h-4 w-4" />
-                                  </button>
-                                  
-                                  <button
-                                    onClick={() => handleDeleteVideo(video.id, video.nome, folder.id)}
-                                    className="text-red-600 hover:text-red-800 p-2 rounded-md hover:bg-red-50"
-                                    title="Excluir"
-                                  >
-                                    <Trash2 className="h-4 w-4" />
-                                  </button>
-                                </div>
+                                {editingVideo?.id !== video.id && (
+                                  <div className="flex items-center space-x-1">
+                                    <button
+                                      onClick={() => openVideoPlayer(video)}
+                                      className="text-primary-600 hover:text-primary-800 p-2 rounded-md hover:bg-primary-50 transition-colors"
+                                      title="Reproduzir no player"
+                                    >
+                                      <Play className="h-4 w-4" />
+                                    </button>
+                                    
+                                    <button
+                                      onClick={() => openVideoInNewTab(video)}
+                                      className="text-blue-600 hover:text-blue-800 p-2 rounded-md hover:bg-blue-50 transition-colors"
+                                      title="Visualizar em nova aba"
+                                    >
+                                      <ExternalLink className="h-4 w-4" />
+                                    </button>
+                                    
+                                    <button
+                                      onClick={() => handleEditVideo(video)}
+                                      className="text-orange-600 hover:text-orange-800 p-2 rounded-md hover:bg-orange-50 transition-colors"
+                                      title="Editar nome"
+                                    >
+                                      <Edit2 className="h-4 w-4" />
+                                    </button>
+                                    
+                                    <button
+                                      onClick={() => openVideoInNewTab(video)}
+                                      className="text-green-600 hover:text-green-800 p-2 rounded-md hover:bg-green-50 transition-colors"
+                                      title="Download"
+                                    >
+                                      <Download className="h-4 w-4" />
+                                    </button>
+                                    
+                                    <button
+                                      onClick={() => handleDeleteVideo(video.id, video.nome, folder.id)}
+                                      className="text-red-600 hover:text-red-800 p-2 rounded-md hover:bg-red-50 transition-colors"
+                                      title="Excluir"
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           ))}
@@ -693,7 +691,7 @@ const GerenciarVideos: React.FC = () => {
         </div>
       )}
 
-      {/* Modal do Player */}
+      {/* Modal do Player Simples */}
       {showPlayerModal && currentVideo && (
         <div 
           className="fixed inset-0 bg-black bg-opacity-95 flex items-center justify-center z-50 p-4"
@@ -703,19 +701,9 @@ const GerenciarVideos: React.FC = () => {
             }
           }}
         >
-          <div className={`bg-black rounded-lg relative ${
-            isFullscreen ? 'w-screen h-screen' : 'max-w-4xl w-full h-[70vh]'
-          }`}>
+          <div className="bg-black rounded-lg relative max-w-4xl w-full h-[70vh]">
             {/* Controles do Modal */}
             <div className="absolute top-4 right-4 z-20 flex items-center space-x-2">
-              <button
-                onClick={() => setIsFullscreen(!isFullscreen)}
-                className="text-white bg-blue-600 hover:bg-blue-700 rounded-full p-3 transition-colors duration-200 shadow-lg"
-                title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
-              >
-                {isFullscreen ? <Minimize size={20} /> : <Maximize size={20} />}
-              </button>
-              
               <button
                 onClick={closeVideoPlayer}
                 className="text-white bg-red-600 hover:bg-red-700 rounded-full p-3 transition-colors duration-200 shadow-lg"
@@ -734,19 +722,23 @@ const GerenciarVideos: React.FC = () => {
               </p>
             </div>
 
-            {/* Player */}
-            <div className={`w-full h-full ${isFullscreen ? 'p-0' : 'p-4 pt-16'}`}>
-              <UniversalVideoPlayer
-                src={buildVideoUrl(currentVideo.url)}
-                title={currentVideo.nome}
-                autoplay={true}
-                controls={true}
-                className="w-full h-full"
-                onError={(error) => {
-                  console.error('Erro no player:', error);
+            {/* Player HTML5 Simples */}
+            <div className="w-full h-full p-4 pt-16">
+              <video
+                src={buildHLSUrl(currentVideo)}
+                className="w-full h-full object-contain"
+                controls
+                autoPlay
+                preload="metadata"
+                onError={(e) => {
+                  console.error('Erro no player:', e);
                   toast.error('Erro ao carregar vídeo. Tente abrir em nova aba.');
                 }}
-              />
+              >
+                <source src={buildHLSUrl(currentVideo)} type="application/vnd.apple.mpegurl" />
+                <source src={buildVideoUrl(currentVideo.url)} type="video/mp4" />
+                Seu navegador não suporta reprodução de vídeo.
+              </video>
             </div>
           </div>
         </div>

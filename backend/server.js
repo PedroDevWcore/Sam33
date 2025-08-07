@@ -144,7 +144,28 @@
         res.setHeader('Cache-Control', 'public, max-age=3600');
       }
       
-      // Configurar URL do Wowza com autenticação
+      // Limpar e processar caminho
+      const cleanPath = requestPath.replace('/content/', '').replace(/^\/+/, '');
+      const pathParts = cleanPath.split('/');
+      
+      if (pathParts.length < 3) {
+        console.log(`❌ Caminho inválido: ${requestPath}`);
+        return res.status(404).json({ error: 'Caminho de vídeo inválido' });
+      }
+      
+      const userLogin = pathParts[0];
+      const folderName = pathParts[1];
+      const fileName = pathParts[2];
+      
+      // Verificar se é MP4 ou precisa de conversão
+      const fileExtension = path.extname(fileName).toLowerCase();
+      const needsConversion = !['.mp4'].includes(fileExtension);
+      
+      // Nome do arquivo final (MP4)
+      const finalFileName = needsConversion ? 
+        fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
+      
+      // Configurar URL do Wowza
       const fetch = require('node-fetch');
       const isProduction = process.env.NODE_ENV === 'production';
       const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
@@ -153,114 +174,35 @@
       
       let wowzaUrl;
       if (isStreamFile) {
-        // Para streams HLS/DASH - usar porta 1935 com formato correto
-        // Converter /content/user/folder/video.ext para /vod/_definst_/mp4:user/folder/video.mp4
-        const cleanPath = requestPath.replace('/content/', '');
-        const pathParts = cleanPath.split('/');
-        
-        if (pathParts.length >= 3) {
-          const userLogin = pathParts[0];
-          const folderName = pathParts[1];
-          const fileName = pathParts[2];
-          
-          // Verificar se é MP4 ou precisa de conversão
-          const fileExtension = path.extname(fileName).toLowerCase();
-          const needsConversion = !['.mp4'].includes(fileExtension);
-          
-          // Nome do arquivo final (MP4)
-          const finalFileName = needsConversion ? 
-            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
-          
-          wowzaUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
-        } else {
-          wowzaUrl = `http://${wowzaHost}:1935${requestPath}`;
-        }
+        // Para streams HLS - usar formato correto do Wowza
+        wowzaUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${userLogin}/${folderName}/${finalFileName}/playlist.m3u8`;
       } else {
-        // Para arquivos de vídeo diretos - usar porta 6980 com autenticação
-        const cleanPath = requestPath.replace('/content/', '');
-        const pathParts = cleanPath.split('/');
-        
-        if (pathParts.length >= 3) {
-          const userLogin = pathParts[0];
-          const folderName = pathParts[1];
-          const fileName = pathParts[2];
-          
-          // Verificar se é MP4 ou precisa de conversão
-          const fileExtension = path.extname(fileName).toLowerCase();
-          const needsConversion = !['.mp4'].includes(fileExtension);
-          
-          // Nome do arquivo final (MP4)
-          const finalFileName = needsConversion ? 
-            fileName.replace(/\.[^/.]+$/, '.mp4') : fileName;
-          
-          wowzaUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${userLogin}/${folderName}/${finalFileName}`;
-        } else {
-          wowzaUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980${requestPath}`;
-        }
+        // Para arquivos de vídeo diretos - usar porta 6980
+        wowzaUrl = `http://${wowzaUser}:${wowzaPassword}@${wowzaHost}:6980/content/${userLogin}/${folderName}/${finalFileName}`;
       }
       
       console.log(`🔗 Redirecionando para: ${wowzaUrl}`);
       
       try {
-        // Preparar headers otimizados (baseado no PHP)
         const requestHeaders = {
           'Range': req.headers.range || '',
           'User-Agent': 'Streaming-System/1.0',
           'Accept': '*/*',
           'Cache-Control': isStreamFile ? 'no-cache' : 'public, max-age=3600',
-          'Connection': 'keep-alive',
-          'Accept-Encoding': 'identity' // Evitar compressão para vídeos
+          'Connection': 'keep-alive'
         };
         
-        // Adicionar autenticação apenas para arquivos VOD
-        if (!isStreamFile) {
-          const authString = Buffer.from(`${wowzaUser}:${wowzaPassword}`).toString('base64');
-          requestHeaders['Authorization'] = `Basic ${authString}`;
-        }
-        
-        // Fazer requisição para o Wowza
         const wowzaResponse = await fetch(wowzaUrl, {
           method: req.method,
           headers: requestHeaders,
-          timeout: isStreamFile ? 5000 : 15000 // Timeout otimizado
+          timeout: 15000
         });
         
         if (!wowzaResponse.ok) {
           console.log(`❌ Erro ao acessar vídeo (${wowzaResponse.status}): ${wowzaUrl}`);
-          
-          // Se for erro 401/403, tentar URL alternativa sem autenticação na URL
-          if (wowzaResponse.status === 401 || wowzaResponse.status === 403) {
-            console.log('🔄 Tentando URL alternativa sem autenticação na URL...');
-            
-            const alternativeUrl = wowzaUrl.replace(/http:\/\/[^@]+@/, 'http://');
-            const alternativeResponse = await fetch(alternativeUrl, {
-              method: req.method,
-              headers: requestHeaders,
-              timeout: 15000
-            });
-            
-            if (alternativeResponse.ok) {
-              console.log(`✅ Sucesso com URL alternativa: ${alternativeUrl}`);
-              
-              // Copiar headers da resposta do Wowza
-              alternativeResponse.headers.forEach((value, key) => {
-                if (!res.headersSent) {
-                  res.setHeader(key, value);
-                }
-              });
-              
-              // Fazer pipe do stream
-              alternativeResponse.body.pipe(res);
-              return;
-            }
-          }
-          
           return res.status(404).json({ 
             error: 'Vídeo não encontrado',
-            details: 'O arquivo não foi encontrado no servidor de streaming',
-            requestPath: requestPath,
-            wowzaUrl: wowzaUrl,
-            status: wowzaResponse.status
+            details: 'O arquivo não foi encontrado no servidor de streaming'
           });
         }
         
